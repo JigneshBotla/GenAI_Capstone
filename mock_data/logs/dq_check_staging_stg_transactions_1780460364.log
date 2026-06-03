@@ -1,0 +1,6 @@
+2026-06-03T09:49:24Z [INFO] Initializing Deco Data Quality Assertions...
+2026-06-03T09:49:24Z [INFO] Connecting to warehouse schema: staging
+2026-06-03T09:49:24Z [INFO] Testing table size and profile: row_count=948201
+2026-06-03T09:49:24Z [TEST] Default Rule: Verify column counts and non-null defaults...
+2026-06-03T09:49:24Z [PASS] Columns verification succeeded.
+2026-06-03T09:49:24Z [INFO] Data Quality suite finished. Status: SUCCESS

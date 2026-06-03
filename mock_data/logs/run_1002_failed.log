@@ -1,0 +1,17 @@
+2026-05-31T04:15:00Z [INFO] Starting Airflow Task Instance: customer_churn_dag.dbt_run_transformations
+2026-05-31T04:15:02Z [INFO] Concurrency: 4 threads
+2026-05-31T04:15:03Z [INFO] 1 of 4 START staging.stg_users ......................... [RUN]
+2026-05-31T04:15:04Z [INFO] 2 of 4 START staging.stg_transactions .................. [RUN]
+2026-05-31T04:15:06Z [INFO] 1 of 4 PASS staging.stg_users .......................... [OK in 2.12s]
+2026-05-31T04:15:07Z [INFO] 2 of 4 PASS staging.stg_transactions ................... [OK in 3.41s]
+2026-05-31T04:15:08Z [INFO] 3 of 4 START marts.fct_user_transactions ............... [RUN]
+2026-05-31T04:15:10Z [INFO] 3 of 4 PASS marts.fct_user_transactions ................ [OK in 2.11s]
+2026-05-31T04:15:11Z [INFO] 4 of 4 START marts.fct_user_churn ...................... [RUN]
+2026-05-31T04:15:13Z [ERROR] Database error: Duplicate entry 'USR_94821' for key 'fct_user_churn.primary'
+2026-05-31T04:15:13Z [ERROR] 4 of 4 ERROR marts.fct_user_churn ..................... [ERROR in 1.87s]
+2026-05-31T04:15:14Z [INFO] Done. PASS=3 WARN=0 ERROR=1 SKIP=0
+2026-05-31T04:15:14Z [FATAL] Pipeline run failed due to compilation or execution error: Marts unique key violation.
+Traceback (most recent call last):
+  File "/opt/airflow/dags/customer_churn_dag.py", line 87, in trigger_dbt_run
+    raise Exception("dbt transformations failed: Marts unique key violation inside marts.fct_user_churn")
+Exception: dbt transformations failed: Marts unique key violation inside marts.fct_user_churn

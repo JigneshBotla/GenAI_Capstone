@@ -1,0 +1,5 @@
+1. add the entire conversation histroy into context
+2. implement nl2sql tool for the agent and the script should be block restricted keywords like (DELETE, TRUNCATE, INSERT, DML commands, DDL commands)
+3. showing the live progress of tool calling in the conversation and thier outputs (note: dont include these in the context)
+4. show the live progress and thinking of the agent in dropdown so it flood up the chat
+5. keep control panel (home) and chatbot in different tabs

@@ -1,0 +1,26 @@
+2026-05-31T02:00:00Z [INFO] Starting Airflow Task Instance: customer_churn_dag.extract_users_from_rds
+2026-05-31T02:00:01Z [INFO] Connecting to database host: db.production.local, port: 5432, database: prod_rds
+2026-05-31T02:00:03Z [INFO] Extract query executed. Fetched 14,812 rows.
+2026-05-31T02:00:04Z [INFO] Uploaded csv file to s3://company-datalake-bronze/users/date=2026-05-31/data.csv
+2026-05-31T02:00:05Z [INFO] Task extract_users_from_rds finished. Status: SUCCESS
+2026-05-31T02:00:05Z [INFO] Starting Airflow Task Instance: customer_churn_dag.load_s3_to_snowflake_bronze
+2026-05-31T02:00:06Z [INFO] Executing COPY INTO bronze.raw_users in Snowflake warehouse PROD_WH...
+2026-05-31T02:00:09Z [INFO] Snowflake COPY completed. 14,812 rows inserted.
+2026-05-31T02:00:10Z [INFO] Starting Airflow Task Instance: customer_churn_dag.dbt_run_transformations
+2026-05-31T02:00:11Z [INFO] Concurrency: 4 threads
+2026-05-31T02:00:12Z [INFO] 1 of 4 START staging.stg_users ......................... [RUN]
+2026-05-31T02:00:13Z [INFO] 2 of 4 START staging.stg_transactions .................. [RUN]
+2026-05-31T02:00:15Z [INFO] 1 of 4 PASS staging.stg_users .......................... [OK in 2.92s]
+2026-05-31T02:00:16Z [INFO] 2 of 4 PASS staging.stg_transactions ................... [OK in 3.12s]
+2026-05-31T02:00:17Z [INFO] 3 of 4 START marts.fct_user_transactions ............... [RUN]
+2026-05-31T02:00:19Z [INFO] 3 of 4 PASS marts.fct_user_transactions ................ [OK in 2.05s]
+2026-05-31T02:00:20Z [INFO] 4 of 4 START marts.fct_user_churn ...................... [RUN]
+2026-05-31T02:00:22Z [INFO] 4 of 4 PASS marts.fct_user_churn ....................... [OK in 1.95s]
+2026-05-31T02:00:23Z [INFO] Done. PASS=4 WARN=0 ERROR=0 SKIP=0
+2026-05-31T02:00:24Z [INFO] Starting Airflow Task Instance: customer_churn_dag.dbt_test_validations
+2026-05-31T02:00:25Z [INFO] Running test unique_stg_users_user_id... [PASS]
+2026-05-31T02:00:26Z [INFO] Running test not_null_stg_users_user_id... [PASS]
+2026-05-31T02:00:27Z [INFO] Running test unique_fct_user_churn_user_id... [PASS]
+2026-05-31T02:00:28Z [INFO] Running test relationships_fct_user_churn_user_id_stg_users_user_id... [PASS]
+2026-05-31T02:00:29Z [INFO] All 4 tests passed. dbt run validated successfully!
+2026-05-31T02:00:30Z [INFO] DAG user_analytics_pipeline completed. Status: SUCCESS
