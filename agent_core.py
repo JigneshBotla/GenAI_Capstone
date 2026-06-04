@@ -2,12 +2,17 @@ import boto3
 import json
 import datetime
 import os
+from dotenv import load_dotenv
 from database_manager import MetadataHelper, VectorStoreHelper
+
+# Load environment variables
+load_dotenv()
+
 
 class AgentCore:
     """Core Agent class that manages tool registration, AWS Bedrock orchestration (Nova Pro), and the tool execution loop."""
     
-    def __init__(self, region_name="us-east-1", aws_access_key_id=None, aws_secret_access_key=None, aws_session_token=None):
+    def __init__(self, region_name="us-east-1", aws_access_key_id=None, aws_secret_access_key=None, aws_session_token=None, model_id=None):
         self.region_name = region_name
         
         # Setup Langfuse credentials in environment
@@ -44,8 +49,8 @@ class AgentCore:
             self.bedrock_client = None
             self.has_aws = False
 
-        # Model identifier
-        self.model_id = "amazon.nova-lite-v1:0"
+        # Model identifier — can be overridden at construction time
+        self.model_id = model_id if model_id else "amazon.nova-lite-v1:0"
 
         # Register tools mapping
         self.tools_map = {
@@ -307,78 +312,59 @@ class AgentCore:
         return output
 
     def tool_trigger_data_quality_check(self, table_id):
-        # Active agentic action!
-        details = self.metadata_helper.get_table_details(table_id)
-        if not details:
-            return f"Cannot run quality tests: table `{table_id}` does not exist in catalog."
-            
-        # Simulate testing logic based on tables
-        timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        log_filename = f"mock_data/logs/dq_check_{table_id.replace('.', '_')}_{datetime.datetime.utcnow().strftime('%s')}.log"
-        
-        test_logs = []
-        test_logs.append(f"{timestamp} [INFO] Initializing Deco Data Quality Assertions...")
-        test_logs.append(f"{timestamp} [INFO] Connecting to warehouse schema: {details['table']['schema_name']}")
-        test_logs.append(f"{timestamp} [INFO] Testing table size and profile: row_count={details['table']['row_count']}")
-        
-        status = "SUCCESS"
-        failures = []
-        
-        # Table specific rules
-        if table_id == "staging.stg_users":
-            test_logs.append(f"{timestamp} [TEST] Rule 1: Validate Unique Constraint on column `user_id`...")
-            test_logs.append(f"{timestamp} [PASS] Column `user_id` contains exactly 0 duplicates.")
-            
-            test_logs.append(f"{timestamp} [TEST] Rule 2: Validate PII masking compliance on column `hashed_email` (SHA-256 validation)...")
-            # Email shouldn't contain raw "@" characters
-            test_logs.append(f"{timestamp} [PASS] Verified 100% of values in `hashed_email` are properly hashed. 0 clear-text emails found.")
-            
-            test_logs.append(f"{timestamp} [TEST] Rule 3: Validate masked phone number pattern `masked_phone`...")
-            test_logs.append(f"{timestamp} [PASS] All phone values conform to target pattern +X-XXX-XXX-XXXX.")
-            
-        elif table_id == "marts.fct_user_churn":
-            test_logs.append(f"{timestamp} [TEST] Rule 1: Validate Unique user_id constraints...")
-            # Let's say it passes now to simulate a fix
-            test_logs.append(f"{timestamp} [PASS] Mart uniqueness constraints validated. 0 duplicate index violations found.")
-            
-            test_logs.append(f"{timestamp} [TEST] Rule 2: Validate column `spend_amount` ranges >= 0...")
-            test_logs.append(f"{timestamp} [PASS] Range boundaries validated successfully.")
-            
-            test_logs.append(f"{timestamp} [TEST] Rule 3: Validate enum options for `churn_status` in ('ACTIVE', 'CHURNED')...")
-            test_logs.append(f"{timestamp} [PASS] Enums check: 100% valid rows.")
-            
-        else:
-            test_logs.append(f"{timestamp} [TEST] Default Rule: Verify column counts and non-null defaults...")
-            test_logs.append(f"{timestamp} [PASS] Columns verification succeeded.")
-            
-        test_logs.append(f"{timestamp} [INFO] Data Quality suite finished. Status: {status}")
-        
-        # Write DQ logs
-        with open(log_filename, "w") as f:
-            f.write("\n".join(test_logs))
-            
-        # Log this active test suite execution in SQLite pipeline_runs
-        run_id = self.metadata_helper.insert_pipeline_run(
-            pipeline_name=f"data_quality_test_{table_id}",
-            status=status,
-            start_time=timestamp,
-            end_time=timestamp,
-            duration_sec=3,
-            error_message=None if status == "SUCCESS" else "; ".join(failures),
-            log_path=log_filename
-        )
-        
-        output = f"### ✅ Agentic Action: Data Quality Check Triggered Successfully!\n"
-        output += f"* **Target Table**: `{table_id}`\n"
-        output += f"* **Created Run ID**: `#{run_id}`\n"
-        output += f"* **Overall Status**: **{status}**\n"
-        output += f"* **Test Log File Saved**: `{log_filename}`\n\n"
-        output += "**Asserted Test Cases Output:**\n"
-        output += "```text\n"
-        output += "\n".join([line for line in test_logs if "[PASS]" in line or "[FAIL]" in line])
-        output += "\n```\n"
-        
+        """Airflow-style orchestration trigger: generate fresh data batch with DQ issues,
+        run full ETL through staging/quarantine/marts, log the pipeline run."""
+
+        if not table_id.startswith("bronze."):
+            return f"❌ Data Quality ETL can only be triggered on bronze source tables. Got: `{table_id}`"
+
+        result = self.metadata_helper.run_dq_etl_pipeline(table_id)
+
+        status     = result.get("status", "UNKNOWN")
+        run_id     = result.get("run_id", "N/A")
+        findings   = result.get("dq_findings", {})
+        duration   = result.get("duration_sec", 0)
+        err        = result.get("error_message")
+        batch_size = findings.get("batch_size", 0)
+        status_icon = "✅" if status == "SUCCESS" else "❌"
+
+        output  = f"### {status_icon} DQ ETL Pipeline Triggered: `{table_id}`\n"
+        output += f"| Field | Value |\n|---|---|\n"
+        output += f"| **Run ID** | `#{run_id}` |\n"
+        output += f"| **Status** | **{status}** |\n"
+        output += f"| **Duration** | {duration}s |\n"
+        output += f"| **Batch Size** | {batch_size:,} new records ingested |\n\n"
+
+        if table_id == "bronze.raw_users":
+            null_id  = findings.get("null_user_id", 0)
+            null_em  = findings.get("null_email", 0)
+            null_cc  = findings.get("null_country_code", 0)
+            staged   = findings.get("passed_to_staging", 0)
+            quar     = findings.get("quarantined", 0)
+            output += "**🔬 DQ Findings — `bronze.raw_users`:**\n\n"
+            output += "| Rule | Severity | Records Found | Action Taken |\n|---|---|---|---|\n"
+            output += f"| Null `user_id` | 🔴 Critical | **{null_id}** | → Quarantined |\n"
+            output += f"| Null `email` | 🟡 High | **{null_em}** | → Passed to Staging |\n"
+            output += f"| Null `country_code` | 🟡 Medium | **{null_cc}** | → Passed to Staging |\n"
+            output += f"\n**ETL Summary:** `{staged:,}` records → `staging.stg_users` | `{quar:,}` records → `staging.stg_users_quarantine`\n"
+
+        elif table_id == "bronze.raw_transactions":
+            null_tx  = findings.get("null_transaction_id", 0)
+            neg_amt  = findings.get("negative_amounts", 0)
+            staged   = findings.get("passed_to_staging", 0)
+            quar     = findings.get("quarantined", 0)
+            output += "**🔬 DQ Findings — `bronze.raw_transactions`:**\n\n"
+            output += "| Rule | Severity | Records Found | Action Taken |\n|---|---|---|---|\n"
+            output += f"| Null `transaction_id` | 🔴 Critical | **{null_tx}** | → Quarantined |\n"
+            output += f"| Negative `amount_usd` | 🟡 High | **{neg_amt}** | → ABS() fix applied |\n"
+            output += f"\n**ETL Summary:** `{staged:,}` records → `staging.stg_transactions` | `{quar:,}` records → `staging.stg_transactions_quarantine`\n"
+
+        if err:
+            output += f"\n> ⚠️ **Pipeline Error:** {err}\n"
+
+        output += "\n> 📊 Switch to the **Operations & SLOs** tab and click **🔄 Refresh** to see updated DQ metrics and run history.\n"
         return output
+
 
     def translate_nl_to_sql(self, nl_query):
         """Translates natural language to Snowflake SQL using Bedrock Nova Pro."""
@@ -650,7 +636,7 @@ Follow a clean tool-use loop:
                     try:
                         gen_ctx = self.langfuse.start_as_current_observation(
                             as_type="generation",
-                            name="amazon.nova-lite-v1:0",
+                            name=self.model_id,
                             model=self.model_id,
                             input=messages,
                             model_parameters={"temperature": 0.1}

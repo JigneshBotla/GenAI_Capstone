@@ -131,6 +131,7 @@ def generate_mock_data():
 def setup_snowflake():
     conn, default_db = get_snowflake_connection()
     cursor = conn.cursor()
+    email_salt = os.getenv("EMAIL_HASH_SALT")
 
     try:
         # Create database and drop schemas first to prevent duplication
@@ -445,13 +446,13 @@ def setup_snowflake():
         # ------------------ RUN SQL-BASED ETL PIPELINES ------------------
         # Clean Users ETL (Route where id is not null)
         print("Running SQL ETL Pipeline: Populating staging.stg_users...")
-        cursor.execute("""
+        cursor.execute(f"""
         INSERT INTO staging.stg_users (user_id, hashed_email, masked_phone, country, created_timestamp, updated_timestamp)
         SELECT
             id AS user_id,
             CASE 
                 WHEN email IS NULL THEN NULL 
-                ELSE SHA2(LOWER(email) || 'SUPER_SECRET_SALT_123', 256) 
+                ELSE SHA2(LOWER(email) || '{email_salt}', 256) 
             END AS hashed_email,
             CASE 
                 WHEN phone_number IS NULL THEN NULL 

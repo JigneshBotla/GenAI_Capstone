@@ -18,7 +18,7 @@ WITH raw_source AS (
 SELECT
     user_id,
     -- Hashing PII for GDPR compliance (ADR-002)
-    SHA2(LOWER(email) || 'SUPER_SECRET_SALT_123') AS hashed_email,
+    SHA2(LOWER(email) || 'f8c3d9b1e5a26748c9d0e1f2b3a4c5d6') AS hashed_email,
     -- Masking phone number (keeps country code and last 4 digits)
     CONCAT('+', country_code, '-XXX-XXX-', RIGHT(phone_number, 4)) AS masked_phone,
     UPPER(country_code) AS country,
