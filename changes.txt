@@ -1,5 +1,13 @@
-1. add the entire conversation histroy into context
+1. add the entire conversation histroy into context for chat..because its forgeting the previously asked questions..
 2. implement nl2sql tool for the agent and the script should be block restricted keywords like (DELETE, TRUNCATE, INSERT, DML commands, DDL commands)
 3. showing the live progress of tool calling in the conversation and thier outputs (note: dont include these in the context)
 4. show the live progress and thinking of the agent in dropdown so it flood up the chat
 5. keep control panel (home) and chatbot in different tabs
+6. Also include langfuse feature for monitoring the agents calls :
+LANGFUSE_SECRET_KEY="sk-lf-3be7acf8-ef72-412a-b7ad-7dd9dd581443"
+LANGFUSE_PUBLIC_KEY="pk-lf-18f10c0e-458e-4120-8e82-2656ba2e2172"
+LANGFUSE_BASE_URL="https://us.cloud.langfuse.com"
+
+Public key:pk-lf-18f10c0e-458e-4120-8e82-2656ba2e2172
+
+Secret key:sk-lf-3be7acf8-ef72-412a-b7ad-7dd9dd581443

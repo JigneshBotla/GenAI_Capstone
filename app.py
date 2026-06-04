@@ -167,7 +167,9 @@ with st.sidebar:
     
     # Active Action Button
     st.markdown("**Manual Trigger Quality Assertions**")
-    dq_table = st.selectbox("Select Target Table:", ["staging.stg_users", "marts.fct_user_churn"])
+    registered_tables = metadata_helper.get_all_tables()
+    table_options = [t["table_id"] for t in registered_tables] if registered_tables else ["staging.stg_users", "marts.fct_user_churn"]
+    dq_table = st.selectbox("Select Target Table:", table_options)
     if st.button("🚀 Trigger Data Quality Suite"):
         with st.spinner("Executing Data Quality validations..."):
             time.sleep(1.5)
@@ -185,10 +187,10 @@ with st.sidebar:
             st.success(f"Checks completed for {dq_table}!")
             st.rerun()
 
-# ----------------- MAIN EXECUTIVE DASHBOARD (LEFT 45%) & CONVERSATION (RIGHT 55%) -----------------
-col_left, col_right = st.columns([9, 11])
+# ----------------- MAIN NAVIGATION TABS -----------------
+tab_dashboard, tab_chatbot = st.tabs(["📊 DE Platform Control Panel", "🤖 Chat with Deco"])
 
-with col_left:
+with tab_dashboard:
     st.title("📊 DE Platform Control Panel")
     st.caption("Live Data Catalog, System Lineage & Operational Observability")
     
@@ -332,8 +334,8 @@ with col_left:
             )
             st.dataframe(styled_df, hide_index=True, use_container_width=True)
 
-# ----------------- CONVERSATIONAL INTERFACE (RIGHT 55%) -----------------
-with col_right:
+# ----------------- CONVERSATIONAL INTERFACE -----------------
+with tab_chatbot:
     st.title("🤖 Chat with Deco")
     st.caption("Your Agentic Data Engineering Assistant")
     
@@ -370,10 +372,64 @@ with col_right:
             
         # Agent response loader
         with st.chat_message("assistant"):
-            with st.spinner("Deco is analyzing metrics and executing database tools..."):
-                agent_response = agent.run_agent(prompt)
-                st.markdown(agent_response)
+            status_container = st.empty()
+            
+            thoughts = []
+            tool_calls = []
+            
+            def agent_callback(event_type, data):
+                if event_type == "thought":
+                    thoughts.append(data)
+                elif event_type == "tool_start":
+                    tool_calls.append({
+                        "name": data["name"],
+                        "args": data["args"],
+                        "result": None,
+                        "status": "running"
+                    })
+                elif event_type == "tool_end":
+                    if tool_calls:
+                        tool_calls[-1]["result"] = data["result"]
+                        tool_calls[-1]["status"] = "completed"
                 
+                with status_container.container():
+                    with st.expander("🤖 Deco's Live Thinking & Tool Execution Process", expanded=True):
+                        if thoughts:
+                            st.markdown("**Thinking & Plan:**")
+                            for thought in thoughts:
+                                st.write(thought)
+                        if tool_calls:
+                            st.markdown("---")
+                            st.markdown("**Tool Calls:**")
+                            for tc in tool_calls:
+                                status_emoji = "⏳" if tc["status"] == "running" else "✅"
+                                st.markdown(f"{status_emoji} Executing tool `{tc['name']}` with arguments: `{tc['args']}`")
+                                if tc["result"]:
+                                    st.markdown("**Output:**")
+                                    st.code(tc["result"])
+            
+            with st.spinner("Deco is analyzing metrics and executing tools..."):
+                agent_response = agent.run_agent(prompt, chat_history=st.session_state.messages, callback=agent_callback)
+                
+            # Collapse the expander at the end
+            with status_container.container():
+                with st.expander("🤖 Deco's Live Thinking & Tool Execution Process", expanded=False):
+                    if thoughts:
+                        st.markdown("**Thinking & Plan:**")
+                        for thought in thoughts:
+                            st.write(thought)
+                    if tool_calls:
+                        st.markdown("---")
+                        st.markdown("**Tool Calls:**")
+                        for tc in tool_calls:
+                            status_emoji = "⏳" if tc["status"] == "running" else "✅"
+                            st.markdown(f"{status_emoji} Executing tool `{tc['name']}` with arguments: `{tc['args']}`")
+                            if tc["result"]:
+                                st.markdown("**Output:**")
+                                st.code(tc["result"])
+                                
+            st.markdown(agent_response)
+            
         # Append Assistant Response
         st.session_state.messages.append({"role": "assistant", "content": agent_response})
         st.rerun()

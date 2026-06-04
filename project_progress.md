@@ -74,6 +74,12 @@ Deco is a unified conversational assistant built with a hybrid approach:
 - [x] **Step 6: Deliverables & Presentation Deck** <!-- id: step_6 -->
   - Generate template / outline for the 10-slide presentation deck.
   - Package workspace files for submission.
+- [x] **Step 7: Enhancement Iterations (New Chat UI & Agent Observability)** <!-- id: step_7 -->
+  - Maintain conversation history to allow continuous QA flow.
+  - Integrate a secure `nl2sql` query tool with robust DDL/DML restrictions.
+  - Design a live collapsible expander dropdown for Deco's thought logs and tool executions in Streamlit.
+  - Pivot UI layout from split-screen columns to main top-level navigation tabs.
+  - Instrument Langfuse SDK tracing for full observability of agent actions and Bedrock interactions.
 
 ---
 
@@ -106,3 +112,7 @@ Deco is a unified conversational assistant built with a hybrid approach:
 ### 🟢 Milestone 6: Capstone Presentation Deck Structuring
 * **Date**: May 31, 2026
 * **Details**: Outlined the complete 10-slide presentation deck layout in `PRESENTATION_DECK_OUTLINE.md`. Mapped out title hooks, segmented problem statements, decoupled hybrid designs, system data flows, governance definitions, incident log diagnostics, active agentic validators, technical roadmap extensions, speaking notes, and visual requirements to hit a high-quality defense outcome.
+
+### 🟢 Milestone 7: Advanced Capabilities, UI Enhancements & Langfuse Tracing
+* **Date**: June 4, 2026
+* **Details**: Integrated full multi-turn conversation history for chat context preservation. Implemented a sandbox-safe `nl2sql` execution engine that automatically token-checks and blocks DDL/DML queries. Redesigned UI to present Home Dashboard and Chat components inside dedicated main tabs. Integrated a live, non-obtrusive expander dropdown rendering real-time thoughts and tool execution flows. Configured Langfuse observability to trace and monitor LLM calls and tool spans in production. Dynamically populated the manual quality assertions dropdown by querying all conformed tables directly from the database catalog instead of using a hardcoded list.

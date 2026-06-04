@@ -1,0 +1,6 @@
+2026-06-04T06:19:42Z [INFO] Initializing Deco Data Quality Assertions...
+2026-06-04T06:19:42Z [INFO] Connecting to warehouse schema: bronze
+2026-06-04T06:19:42Z [INFO] Testing table size and profile: row_count=153821
+2026-06-04T06:19:42Z [TEST] Default Rule: Verify column counts and non-null defaults...
+2026-06-04T06:19:42Z [PASS] Columns verification succeeded.
+2026-06-04T06:19:42Z [INFO] Data Quality suite finished. Status: SUCCESS
