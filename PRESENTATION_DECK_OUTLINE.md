@@ -29,7 +29,8 @@ This document provides a highly structured, content-complete outline for your 10
 
 ---
 
-## 🛝 Slide 3: The Deco Solution: Hybrid Architecture
+
+
 * **Slide Title**: Deco Co-pilot: Unified Interface for DE Teams
 * **Subtitle**: Combining Vector Retrieval with Deterministic Metadata Processing
 * **Core Visuals**: A three-pillar architecture diagram showing:

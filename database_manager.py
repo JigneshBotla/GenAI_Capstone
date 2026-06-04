@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 import chromadb
 from chromadb.utils import embedding_functions
 import pandas as pd
+import math
+import re
+from collections import Counter
 
 # Load environment variables
 load_dotenv()
@@ -545,6 +548,51 @@ class MetadataHelper:
             conn.close()
 
 
+class BM25:
+    """Lightweight, self-contained implementation of BM25 for ranking documents."""
+    def __init__(self, corpus, k1=1.5, b=0.75):
+        self.k1 = k1
+        self.b = b
+        self.corpus_size = len(corpus)
+        self.avg_doc_len = 0.0
+        self.doc_lengths = []
+        self.doc_term_freqs = []
+        self.df = Counter()
+        self.idf = {}
+        
+        total_len = 0
+        for doc in corpus:
+            # Tokenize and normalize words, removing punctuation
+            tokens = [w.strip(".,!?\"'()[]{}") for w in doc.lower().split() if w.strip()]
+            self.doc_lengths.append(len(tokens))
+            total_len += len(tokens)
+            
+            freqs = Counter(tokens)
+            self.doc_term_freqs.append(freqs)
+            for token in freqs:
+                self.df[token] += 1
+                
+        self.avg_doc_len = total_len / self.corpus_size if self.corpus_size > 0 else 0.0
+        
+        for token, freq in self.df.items():
+            # Standard BM25 IDF formulation
+            self.idf[token] = math.log((self.corpus_size - freq + 0.5) / (freq + 0.5) + 1.0)
+
+    def get_score(self, doc_idx, query_tokens):
+        score = 0.0
+        doc_len = self.doc_lengths[doc_idx]
+        freqs = self.doc_term_freqs[doc_idx]
+        
+        for token in query_tokens:
+            if token in freqs:
+                tf = freqs[token]
+                idf = self.idf.get(token, 0.0)
+                numerator = idf * tf * (self.k1 + 1.0)
+                denominator = tf + self.k1 * (1.0 - self.b + self.b * doc_len / self.avg_doc_len)
+                score += numerator / denominator
+        return score
+
+
 class VectorStoreHelper:
     """Helper class to load documents/codebase into ChromaDB and query the vector store."""
     
@@ -559,8 +607,120 @@ class VectorStoreHelper:
             embedding_function=self.embedding_function
         )
 
+    def semantic_chunking(self, content):
+        """Splits prose content into semantic parent chunks using sentence embeddings and similarity thresholds."""
+        # Split content into sentences
+        sentence_ends = re.compile(r'(?<=[.!?])\s+')
+        sentences = [s.strip() for s in sentence_ends.split(content) if s.strip()]
+        
+        if len(sentences) < 4:
+            return [content]
+            
+        try:
+            # Generate embeddings for each sentence
+            embeddings = self.embedding_function(sentences)
+        except Exception as e:
+            print(f"Warning: Semantic chunking embedding failed, falling back to basic split: {e}")
+            return [content]
+            
+        # Cosine similarity helper
+        def cosine_similarity(u, v):
+            dot = sum(a * b for a, b in zip(u, v))
+            norm_u = math.sqrt(sum(a * a for a in u))
+            norm_v = math.sqrt(sum(b * b for b in v))
+            if norm_u == 0 or norm_v == 0:
+                return 0.0
+            return dot / (norm_u * norm_v)
+            
+        # Calculate distance between consecutive sentences
+        distances = []
+        for i in range(len(sentences) - 1):
+            dist = 1.0 - cosine_similarity(embeddings[i], embeddings[i+1])
+            distances.append(dist)
+            
+        if not distances:
+            return [content]
+            
+        # Set split threshold at mean + 0.8 * std
+        mean_dist = sum(distances) / len(distances)
+        variance = sum((x - mean_dist) ** 2 for x in distances) / len(distances)
+        std_dist = math.sqrt(variance)
+        threshold = mean_dist + 0.8 * std_dist
+        
+        # Group sentences into parent chunks
+        parent_chunks = []
+        current_chunk = [sentences[0]]
+        
+        for i in range(len(distances)):
+            next_sentence = sentences[i+1]
+            if distances[i] > threshold:
+                parent_chunks.append(" ".join(current_chunk))
+                current_chunk = [next_sentence]
+            else:
+                current_chunk.append(next_sentence)
+                
+        if current_chunk:
+            parent_chunks.append(" ".join(current_chunk))
+            
+        return parent_chunks
+
+    def generate_child_chunks(self, parent_text):
+        """Generates sliding window child chunks from a parent chunk of text."""
+        sentence_ends = re.compile(r'(?<=[.!?])\s+')
+        sentences = [s.strip() for s in sentence_ends.split(parent_text) if s.strip()]
+        
+        if len(sentences) <= 2:
+            return [parent_text]
+            
+        child_chunks = []
+        window_size = 2
+        step = 1
+        for i in range(0, len(sentences) - window_size + 1, step):
+            window = sentences[i:i + window_size]
+            child_chunks.append(" ".join(window))
+        return child_chunks
+
+    def chunk_codebase_file(self, content):
+        """Splits code files into parent and child chunks based on line groups."""
+        lines = content.splitlines()
+        if len(lines) <= 20:
+            return [{"parent": content, "children": [content]}]
+            
+        parent_size = 30
+        parent_overlap = 5
+        child_size = 10
+        child_overlap = 3
+        
+        parent_child_groups = []
+        
+        i = 0
+        while i < len(lines):
+            parent_lines = lines[i:i + parent_size]
+            parent_text = "\n".join(parent_lines)
+            
+            children = []
+            j = 0
+            while j < len(parent_lines):
+                child_lines = parent_lines[j:j + child_size]
+                child_text = "\n".join(child_lines)
+                children.append(child_text)
+                j += (child_size - child_overlap)
+                if j >= len(parent_lines):
+                    break
+                    
+            parent_child_groups.append({
+                "parent": parent_text,
+                "children": children
+            })
+            
+            i += (parent_size - parent_overlap)
+            if i >= len(lines):
+                break
+                
+        return parent_child_groups
+
     def load_markdown_docs(self, docs_dir="mock_data/docs"):
-        """Recursively scan documentation directories and index markdown files."""
+        """Recursively scan documentation directories and index markdown files using semantic & parent-child chunking."""
         collection = self.get_or_create_collection()
         documents = []
         metadatas = []
@@ -575,21 +735,24 @@ class VectorStoreHelper:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
                         
-                    chunks = content.split("\n## ")
-                    for i, chunk in enumerate(chunks):
-                        if not chunk.strip():
-                            continue
+                    # Semantic chunking into parents
+                    parent_chunks = self.semantic_chunking(content)
+                    
+                    for p_idx, parent_text in enumerate(parent_chunks):
+                        parent_id = f"parent_{rel_path.replace('/', '_').replace('.', '_')}_{p_idx}"
+                        child_texts = self.generate_child_chunks(parent_text)
                         
-                        chunk_text = ("## " + chunk) if i > 0 else chunk
-                        
-                        documents.append(chunk_text)
-                        metadatas.append({
-                            "source_file": rel_path,
-                            "file_type": "documentation",
-                            "chunk_id": i
-                        })
-                        ids.append(f"doc_{rel_path.replace('/', '_').replace('.', '_')}_{i}")
-                        
+                        for c_idx, child_text in enumerate(child_texts):
+                            documents.append(child_text)
+                            metadatas.append({
+                                "source_file": rel_path,
+                                "file_type": "documentation",
+                                "parent_id": parent_id,
+                                "parent_text": parent_text,
+                                "chunk_type": "child"
+                            })
+                            ids.append(f"child_{rel_path.replace('/', '_').replace('.', '_')}_{p_idx}_{c_idx}")
+                            
         if documents:
             collection.add(
                 documents=documents,
@@ -599,7 +762,7 @@ class VectorStoreHelper:
         return len(documents)
 
     def load_codebase(self, codebase_dir="mock_data/codebase"):
-        """Recursively scan codebase directories and index SQL and Python files."""
+        """Recursively scan codebase directories and index SQL and Python files using parent-child chunking."""
         collection = self.get_or_create_collection()
         documents = []
         metadatas = []
@@ -614,14 +777,23 @@ class VectorStoreHelper:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
                         
-                    documents.append(content)
-                    metadatas.append({
-                        "source_file": rel_path,
-                        "file_type": "code_" + file.split(".")[-1],
-                        "chunk_id": 0
-                    })
-                    ids.append(f"code_{rel_path.replace('/', '_').replace('.', '_')}_0")
+                    groups = self.chunk_codebase_file(content)
                     
+                    for p_idx, group in enumerate(groups):
+                        parent_text = group["parent"]
+                        parent_id = f"parent_{rel_path.replace('/', '_').replace('.', '_')}_{p_idx}"
+                        
+                        for c_idx, child_text in enumerate(group["children"]):
+                            documents.append(child_text)
+                            metadatas.append({
+                                "source_file": rel_path,
+                                "file_type": "code_" + file.split(".")[-1],
+                                "parent_id": parent_id,
+                                "parent_text": parent_text,
+                                "chunk_type": "child"
+                            })
+                            ids.append(f"child_{rel_path.replace('/', '_').replace('.', '_')}_{p_idx}_{c_idx}")
+                            
         if documents:
             collection.add(
                 documents=documents,
@@ -631,23 +803,109 @@ class VectorStoreHelper:
         return len(documents)
 
     def query(self, query_text, n_results=3):
-        """Query the vector store for semantic matches."""
+        """Query the vector store using a hybrid search (BM25 + Vector) and Reciprocal Rank Fusion (RRF),
+        returning parent chunks (from parent-child relationships) to context ground the response."""
         collection = self.get_or_create_collection()
-        results = collection.query(
-            query_texts=[query_text],
-            n_results=n_results
-        )
         
-        formatted_results = []
-        if results and results["documents"]:
-            docs = results["documents"][0]
-            metas = results["metadatas"][0]
-            distances = results["distances"][0] if "distances" in results else [0]*len(docs)
+        # 1. Vector Search
+        try:
+            vector_results = collection.query(
+                query_texts=[query_text],
+                n_results=20
+            )
+        except Exception as e:
+            print(f"Warning: ChromaDB vector search failed: {e}")
+            vector_results = None
             
-            for doc, meta, dist in zip(docs, metas, distances):
-                formatted_results.append({
-                    "content": doc,
-                    "metadata": meta,
-                    "distance": dist
-                })
+        # 2. Retrieve all documents from collection for BM25 search
+        try:
+            all_chunks = collection.get()
+        except Exception as e:
+            print(f"Warning: Failed to fetch collection documents for BM25: {e}")
+            all_chunks = None
+            
+        # Map to track doc results and RRF scoring
+        doc_map = {}
+        
+        # Rankings lists
+        vector_ranking = []
+        bm25_ranking = []
+        
+        # Process vector search results ranking
+        if vector_results and vector_results["ids"] and vector_results["ids"][0]:
+            ids = vector_results["ids"][0]
+            docs = vector_results["documents"][0]
+            metas = vector_results["metadatas"][0]
+            
+            for rank, (doc_id, doc_text, meta) in enumerate(zip(ids, docs, metas)):
+                vector_ranking.append(doc_id)
+                doc_map[doc_id] = (doc_text, meta)
+                
+        # Process BM25 ranking
+        if all_chunks and all_chunks["ids"]:
+            all_ids = all_chunks["ids"]
+            all_docs = all_chunks["documents"]
+            all_metas = all_chunks["metadatas"]
+            
+            # Initialize BM25 search
+            bm25 = BM25(all_docs)
+            query_tokens = [w.strip(".,!?\"'()[]{}") for w in query_text.lower().split() if w.strip()]
+            
+            scores = []
+            for doc_idx, doc_id in enumerate(all_ids):
+                score = bm25.get_score(doc_idx, query_tokens)
+                scores.append((doc_id, score, all_docs[doc_idx], all_metas[doc_idx]))
+                
+            # Sort by score descending
+            scores.sort(key=lambda x: x[1], reverse=True)
+            
+            # Take top 20 for ranking
+            for doc_id, score, doc_text, meta in scores[:20]:
+                if score > 0.0:
+                    bm25_ranking.append(doc_id)
+                    doc_map[doc_id] = (doc_text, meta)
+                    
+        # 3. Reciprocal Rank Fusion (RRF)
+        rrf_scores = {}
+        k = 60
+        
+        for doc_id in doc_map.keys():
+            v_rank = vector_ranking.index(doc_id) if doc_id in vector_ranking else None
+            b_rank = bm25_ranking.index(doc_id) if doc_id in bm25_ranking else None
+            
+            v_score = 1.0 / (k + v_rank) if v_rank is not None else 0.0
+            b_score = 1.0 / (k + b_rank) if b_rank is not None else 0.0
+            
+            rrf_scores[doc_id] = v_score + b_score
+            
+        # Sort docs by RRF score descending
+        sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # 4. Formulate output results (retrieving parents)
+        formatted_results = []
+        retrieved_parent_ids = set()
+        
+        for doc_id, score in sorted_docs:
+            if len(formatted_results) >= n_results:
+                break
+                
+            doc_text, meta = doc_map[doc_id]
+            parent_id = meta.get("parent_id") if isinstance(meta, dict) else None
+            parent_text = meta.get("parent_text") if isinstance(meta, dict) else None
+            
+            if parent_text:
+                if parent_id in retrieved_parent_ids:
+                    continue
+                retrieved_parent_ids.add(parent_id)
+                content = parent_text
+            else:
+                content = doc_text
+                
+            formatted_results.append({
+                "content": content,
+                "metadata": meta,
+                "score": score
+            })
+            
         return formatted_results
+

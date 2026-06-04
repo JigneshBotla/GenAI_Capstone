@@ -106,3 +106,6 @@ Deco is a unified conversational assistant built with a hybrid approach:
 ### 🟢 Milestone 6: Capstone Presentation Deck Structuring
 * **Date**: May 31, 2026
 * **Details**: Outlined the complete 10-slide presentation deck layout in `PRESENTATION_DECK_OUTLINE.md`. Mapped out title hooks, segmented problem statements, decoupled hybrid designs, system data flows, governance definitions, incident log diagnostics, active agentic validators, technical roadmap extensions, speaking notes, and visual requirements to hit a high-quality defense outcome.
+
+
+### Our project is live on : https://genaicapstone-deco.streamlit.app

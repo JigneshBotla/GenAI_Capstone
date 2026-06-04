@@ -6,8 +6,6 @@ def setup_directories():
     directories = [
         "mock_data",
         "mock_data/docs",
-        "mock_data/docs/design_decisions",
-        "mock_data/docs/pipelines",
         "mock_data/codebase",
         "mock_data/codebase/dbt/models/staging",
         "mock_data/codebase/dbt/models/marts",
@@ -20,108 +18,421 @@ def setup_directories():
 
 def setup_docs():
     # 1. Architecture overview
-    architecture_overview = """# Data Platform Architecture Overview
+    architecture_overview = """# architecture_overview.md
 
-Welcome to the enterprise Data Platform documentation! This project follows a modern Lakehouse architecture based on the **Medallion design pattern** (Bronze -> Silver -> Gold) hosted on AWS and Snowflake.
+Welcome to the internal system architecture and design documentation for "Deco" — the RAG-powered Data Engineering AI Assistant and Observability Platform. This reference is designed to assist engineers in understanding our storage layers, routing topologies, and semantic systems.
 
-## Architectural Layers
+## 1. What Deco Is and the Problem It Solves
+
+Data platform operations often suffer from critical information fragmentation. When debugging a failing ingestion task or verifying regulatory compliance, engineers must typically hop between disparate environments:
+* **Codebases**: Stored in Git repositories containing dbt transformation scripts and Apache Airflow DAG workflows.
+* **Data Catalogs**: Catalog schemas, line-level lineage lists, and compliance data tags.
+* **Execution Logs**: Historical error files, run duration metrics, and SLA status monitors.
+
+Deco resolves this fragmentation by unifying all of these developer-facing views into a single, interactive control room. It acts as an agentic co-pilot that helps teams query schema definitions, trace lineage dependencies, inspect system health logs, perform sandbox-restricted SQL database queries, and trigger active data quality validation checks directly from a Streamlit conversational portal.
+
+## 2. Hybrid System Architecture (Snowflake + ChromaDB)
+
+Deco uses a hybrid architecture combining a deterministic database management system (Snowflake) with a semantic search engine (ChromaDB). 
 
 ```
-  [Raw Sources]
-        |  (Airflow + custom ingestion python scripts)
-        v
-+-----------------+
-|   Bronze Lake   |  Raw database replication, JSON API outputs, S3 logs.
-| (raw_schema)    |  * Append-only ingestion, partitioned by day.
-+--------+--------+
-         |  (dbt staging transformations)
-         v
-+-----------------+
-|  Silver Lake    |  Cleaned, conformed, hashed PII, schema validated.
-| (staging_schema)|  * Filtered records, default conversions, data type standardizations.
-+--------+--------+
-         |  (dbt marts transformations)
-         v
-+-----------------+
-|   Gold Lake     |  Business-level aggregates, star schema, denormalized dimensions.
-|  (marts_schema) |  * Highly optimized for BI (Looker, Tableau) and ML modeling.
-+-----------------+
+                                  +-----------------------+
+                                  |     Streamlit UI      |
+                                  +-----------+-----------+
+                                              |
+                                              v
+                                  +-----------+-----------+
+                                  |   Deco Agent Core     |
+                                  | (AWS Bedrock Nova)    |
+                                  +-----+-----------+-----+
+                                        |           |
+                        +---------------+           +---------------+
+                        |                                           |
+                        v                                           v
+            +-----------+-----------+                   +-----------+-----------+
+            |  Vector Search DB     |                   |  Lakehouse Compute    |
+            |  (ChromaDB Local)     |                   | (Snowflake Database)  |
+            +-----------+-----------+                   +-----------+-----------+
+                        |                                           |
+                        v                                           v
+            * Codebase files (.sql, .py)                 * Medallion data tables
+            * Markdown design records                    * Catalog & Lineage tables
+            * Technical documentation                    * Pipeline & SLA logs
 ```
 
-## Primary Storage & Transformation Tech Stack
-* **Storage & Compute**: Snowflake acts as the primary data warehouse (Lakehouse compute).
-* **Ingestion**: Custom Python scripts orchestrated by Apache Airflow load data from PostgreSQL RDS, external APIs, and S3 buckets into Snowflake's `Bronze` schema.
-* **Transformations**: dbt (data build tool) is utilized to manage dependencies and build view/table layers across `Silver` (Staging) and `Gold` (Marts).
-* **Metadata & Lineage**: Handled via table tags in Snowflake and dbt documentation manifests.
+* **Snowflake (Lakehouse Compute)**: Snowflake acts as our primary datastore and query engine. It hosts all structured production data tables, data quality logs, schemas, lineage logs, and execution times. Using Snowflake guarantees deterministic, real-time retrievals of critical schemas and performance stats.
+* **ChromaDB (Vector Database)**: ChromaDB acts as our semantic knowledge retriever. It stores embedded chunks of unstructured repository assets: dbt transformation code blocks, DAG structures, architectural decision records (ADRs), and markdown docs. Chunks are indexed using the `all-MiniLM-L6-v2` SentenceTransformer model.
+* **Why They Complement Each Other**: If a junior engineer queries: *"Which table holds transactions, and what is its validation lineage?"*, the agent runs a semantic query against ChromaDB to find architectural context (from markdown documentation) while concurrently executing a structured query against Snowflake catalog tables (`public.columns` and `public.lineage`) to fetch the exact schema definition and upstream dependency paths.
+
+## 3. End-to-End Medallion Data Flow
+
+The platform implements the standard Medallion pattern (Bronze -> Silver -> Gold). Data flows along two parallel pipelines:
+
+### User Profiles Pipeline
+1. **Bronze Layer (`bronze.raw_users`)**: Ingests raw, raw-structured user details directly from PostgreSQL database replicas. Dirty records, duplicate IDs, and null rows are retained here.
+2. **Silver Layer (`staging.stg_users` & `staging.stg_users_quarantine`)**: Re-maps columns to standard types, enforces email hashing with a dynamic salt, and masks phone numbers.
+   * If a row contains a valid, non-null ID, it is routed to `staging.stg_users`.
+   * If the `id` column is null, the row is routed to `staging.stg_users_quarantine` along with a reason tag.
+3. **Gold Layer (`marts.fct_user_churn`)**: Combines conformed user records from `staging.stg_users` with transactional facts from `marts.fct_user_transactions` to classify users as `ACTIVE` or `CHURNED`.
+
+### Financial Transactions Pipeline
+1. **Bronze Layer (`bronze.raw_transactions`)**: Receives transaction records from payment processor API dumps. Negative values and null transaction IDs are retained.
+2. **Silver Layer (`staging.stg_transactions` & `staging.stg_transactions_quarantine`)**: Standardizes currency fields, filters out sandbox tests, and converts negative amounts.
+   * If `transaction_id` is null, the row is routed to `staging.stg_transactions_quarantine`.
+   * If a row has a negative amount, the absolute value is computed via `ABS(amount_usd)`.
+3. **Gold Layer (`marts.fct_user_transactions` & `marts.fct_user_churn`)**:
+   * `marts.fct_user_transactions` aggregates lifetime transaction counts, total USD spend, and last active timestamps grouped by user.
+   * `marts.fct_user_churn` utilizes these transactional aggregates to analyze active retention metrics.
+
+## 4. Medallion Schemas Breakdown
+
+Every schema inside the `Capstone_DB` Snowflake database has a dedicated responsibility:
+
+| Schema | Target Audience | Role & Operations | Primary Tables |
+|---|---|---|---|
+| `BRONZE` | Data Ingestion | Append-only raw replication. Retains duplicate rows, missing fields, and bad formatting for auditing. | `raw_users`, `raw_transactions` |
+| `STAGING` | Data Engineers | Cleanses, standardizes types, hashes PII, applies data quality rules, and routes invalid rows to quarantine. | `stg_users`, `stg_users_quarantine`, `stg_transactions`, `stg_transactions_quarantine` |
+| `MARTS` | BI Analysts / ML | Highly optimized business logic aggregates. Enforces unique grains and aggregates. | `fct_user_transactions`, `fct_user_churn` |
+| `PUBLIC` | Governance / Agent | Catalog schemas, line-level lineage lists, SLA targets, execution run logs, and data quality check histories. | `tables`, `columns`, `lineage`, `pipeline_runs`, `pipeline_slo` |
+
+## 5. Agent Service Interactions & Bedrock Orchestration
+
+The Deco assistant is driven by AWS Bedrock utilizing the `amazon.nova-lite-v1:0` model. The services coordinate as follows:
+1. **User Request**: The user submits a query via the Streamlit frontend.
+2. **Bedrock Routing**: The agent decides if it needs semantic information (searching ChromaDB) or structured data (querying Snowflake via tools).
+3. **Tool Execution**:
+   * If a semantic search is needed, the agent invokes `search_codebase_and_docs` which calls ChromaDB.
+   * If schema details are needed, the agent invokes `get_table_schema` which queries `public.columns`.
+   * If lineage maps are requested, the agent invokes `get_table_lineage` which queries `public.lineage`.
+   * If analytical stats are requested, the agent invokes `nl2sql` which compiles and runs a query directly against Snowflake database schemas.
+4. **Synthesis & Frontend rendering**: The agent receives the tools' responses, isolates its reasoning within `<thinking>` tags (rendered as a collapsible dropdown in Streamlit), and outputs the clean markdown text to the user.
+5. **Observability Tracking**: Every model execution step and tool latency span is reported to Langfuse via the Langfuse SDK for performance tracking.
+
+## 6. Stack Selection Rationale
+
+* **Snowflake**: Selected for structured operational data, conformed schemas, and catalog metadata. It provides secure DDL/DML sandboxes and fast analytical queries.
+* **ChromaDB**: Chosen as a lightweight, persistent local vector database to index and search unstructured developer assets (dbt, markdown documents, DAG files).
+* **AWS Bedrock Nova**: Selected as the LLM backend for its robust tool-calling Converse API, low latency, and parsing speeds.
+* **SentenceTransformer (`all-MiniLM-L6-v2`)**: Used as a local, free embedding model to convert repository files into 384-dimensional vectors without external API calls.
+* **Langfuse**: Chosen to trace agent execution paths, map latency bottlenecks, and capture tool execution errors.
 """
-    
-    # 2. Design decisions - PII governance
-    pii_governance = """# Architectural Decision Record (ADR): PII Data Masking & Governance
 
-* **Status**: Approved
-* **Date**: October 14, 2025
-* **Author**: Lead Data Architect
+    # 2. Design decisions - Data Governance Policy
+    data_governance_policy = """# data_governance_policy.md
 
-## Context
-Under compliance policies (GDPR and CCPA), Personally Identifiable Information (PII) must not be accessible in downstream business-level aggregates (`Gold` layer) or queryable by analyst roles without explicitly approved security clearance. 
+Compliance and data governance represent core components of the Deco platform. This document defines our Data Quality (DQ) pipeline rules, email anonymization logic, phone number masking structures, PII metadata audits, and quarantine architectures.
 
-## Decisions
-1. **Source Isolation**: All raw tables in the `Bronze` schema containing PII (e.g. email, phone numbers, customer names) are locked down and restricted exclusively to the `airflow_svc` ingestion role.
-2. **Silver-Layer Masking**: As data transitions from `Bronze` (raw) to `Silver` (staging), PII columns MUST be transformed using SHA-256 hashing with a system salt, or fully masked.
-   * Email fields: Standardized to lowercase and hashed using `SHA2(email || salt)`.
-   * Phone numbers: Masked to keep only the country code and last 4 digits (e.g. `+1-XXX-XXX-4821`).
-   * Names: Replaced with synthetic surrogate tokens generated by hashing user IDs.
-3. **Audit Trail**: Metadata properties must explicitly tag columns containing PII with `is_pii = true` and details of their masking policy.
+## 1. Data Quality (DQ) Pipeline Rules
+
+To guarantee conformed values enter downstream analytical datasets, specific validation actions are triggered during SQL-based ETL runs in Snowflake. The table below documents the exact rule constraints and violation routing:
+
+| Source Table | Target Table | Validating Rule Constraint | Action Taken on Violation / Logic |
+|---|---|---|---|
+| `bronze.raw_users` | `staging.stg_users` | `id IS NOT NULL` | Conformed clean record is loaded. |
+| `bronze.raw_users` | `staging.stg_users_quarantine` | `id IS NULL` | Record is quarantined with a reason tag of `'Critical: Null user_id (id)'` and a quarantined timestamp. |
+| `bronze.raw_users` | `staging.stg_users` | `email` or `country_code` is NULL | Warning is logged. Email is hashed (if null, remains null), and country code is standard-mapped (defaults to `'XX'` during phone masking and `'NONE'` for empty fields). |
+| `bronze.raw_transactions` | `staging.stg_transactions` | `amount_usd >= 0` | Standard load. Negative amount values are auto-corrected using absolute value: `ABS(amount_usd)`. |
+| `bronze.raw_transactions` | `staging.stg_transactions_quarantine` | `transaction_id IS NULL` | Record is quarantined with reason tag `'Critical: Null transaction_id (transaction_id)'`. |
+| `staging.stg_transactions` | `marts.fct_user_transactions` | `transaction_status = 'completed'` | Filters out failing payments and test transactions. Only completed payments are aggregated per user. |
+| `staging.stg_users` & `marts.fct_user_transactions` | `marts.fct_user_churn` | `DATEDIFF('day', last_active_timestamp, CURRENT_DATE()) <= 30` | If the last active date is more than 30 days ago (or is null), `churn_status` is marked as `'CHURNED'`. Otherwise, it is flagged as `'ACTIVE'`. |
+
+## 2. Email Anonymization (Hashing)
+
+Personally Identifiable Information (PII) must be obscured to comply with CCPA and GDPR constraints before analysts can query the tables.
+* **Exact Hashing Formula**: 
+  ```sql
+  SHA2(LOWER(email) || 'SUPER_SECRET_SALT_123', 256)
+  ```
+  *(Note: In the active python code base implementation, this static salt value is loaded dynamically from the `EMAIL_HASH_SALT` environment variable to prevent secret leakage).*
+* **Why Salting is Used**: Plain SHA-256 hashes are vulnerable to rainbow table dictionary attacks where common email addresses can be brute-forced. Appending a secret "salt" (or Pepper) prior to hashing ensures that the resulting string cannot be mapped back to its original plain text without possession of the system salt.
+* **Where This Happens**: This masking is applied inside the staging layer when transforming data from `bronze.raw_users` into `staging.stg_users`. The output is loaded into the `hashed_email` column.
+
+## 3. Phone Number Masking
+
+Phone numbers are masked to balance analytical utility with consumer privacy.
+* **Exact Masking Formula**:
+  ```sql
+  CONCAT('+', COALESCE(country_code, 'XX'), '-XXX-XXX-', RIGHT(phone_number, 4))
+  ```
+* **Why This Logic is Applied**: It preserves the regional context (the country code) and the final 4 digits of the phone number. Preserving this metadata lets customer service trace payment receipts and geo-segment analytics without exposing the full phone digits.
+* **Where This Happens**: This transformation is executed during staging ETL loads from `bronze.raw_users` to the `masked_phone` column in `staging.stg_users`.
+
+## 4. PII Metadata Tagging and Catalog Surfacing
+
+Governance audits require tracking where PII is stored. 
+* **Metadata Table Registry**: The Snowflake metadata table `public.columns` maintains a registry of column classifications. For every column, it tracks:
+  - `is_pii` (BOOLEAN): Flagged as `TRUE` if the field contains raw or masked PII.
+  - `pii_type` (VARCHAR): Classified as `NAME`, `EMAIL`, `PHONE`, or `NONE`.
+  - `masking_policy` (VARCHAR): Details the anonymization status (e.g. `'SHA-256 with Pepper Salt'`, `'Masked: keeping code + last 4 digits'`, or `'Raw (Restricted Access)'`).
+* **UI Catalog Surface**: The Streamlit interface queries this table dynamically to display schema tables. When users click on a table in the Catalog tab, columns tagged as PII are highlighted with alert indicators alongside their corresponding masking policies.
+
+## 5. Purpose of Quarantine Tables
+
+Rather than dropping raw rows that fail validation checks (e.g., null identifiers), the platform routes them to dedicated quarantine tables: `staging.stg_users_quarantine` and `staging.stg_transactions_quarantine`.
+* **Lineage & Audit trails**: Retaining failed rows ensures that the raw data volume in Bronze matches the combined volume of staging clean rows and quarantined rows.
+* **Debugging**: Data engineers can query quarantine tables to identify upstream extraction failures (e.g., API parser bugs generating null IDs).
+* **Reprocessing**: Once upstream ingestion pipelines are corrected, quarantined rows can be reprocessed without rebuilding the entire historical Bronze catalog.
 """
 
-    # 3. Design decisions - Orchestration choices
-    orchestration_choices = """# Architectural Decision Record (ADR): Airflow for Orchestration & dbt for ELT
+    # 3. Codebase reference
+    codebase_reference = """# codebase_reference.md
 
-* **Status**: Approved
-* **Date**: July 22, 2025
-* **Author**: Platform Team
+This codebase reference serves as an engineering manual for our dbt models, Apache Airflow workflows, and vector indexing operations. It provides precise descriptions of the underlying SQL queries, ingestion schedules, and chunking parameters.
 
-## Context
-We need a robust, scalable workflow orchestrator capable of managing external API ingestion, heavy DB extraction, and modeling workflows.
+## 1. Staging dbt Models (Silver Layer)
 
-## Decisions
-1. **Decoupled Orchestration vs. Transformation**:
-   * **Apache Airflow** is chosen to orchestrate *ingestion* tasks (extracting from PostgreSQL RDS, pulling third-party API data, dumping to S3, loading to Snowflake Bronze).
-   * **dbt** is chosen for all internal Snowflake *transformations* (Silver staging and Gold marts).
-2. **Orchestration Pattern**:
-   * Airflow triggers the dbt jobs using the `dbt-cloud` CLI / API interface or locally inside ECS tasks, ensuring that dbt models run only after their respective Bronze source ingestion pipelines complete successfully.
-   * Airflow monitors execution status, handles alerting to Slack/PagerDuty, and manages job retries.
+Staging models ingest raw fields from Bronze replicas, execute cleaning routines, and separate malformed rows into quarantine tables.
+
+### `stg_users`
+* **Source Table**: `bronze.raw_users`
+* **Transformation Logic**:
+  * Filtering: Filters out rows where the primary key `id` is null (`WHERE id IS NOT NULL`).
+  * Email Hashing: Applies lowercase standardization and hashes values:
+    ```sql
+    SHA2(LOWER(email) || '{salt}', 256)
+    ```
+  * Phone Masking: Preserves region code and last 4 digits:
+    ```sql
+    CONCAT('+', country_code, '-XXX-XXX-', RIGHT(phone_number, 4))
+    ```
+  * Country Standardizing: Converts country strings to uppercase via `UPPER(country_code)`.
+* **Output Columns**:
+  - `user_id` (TEXT): Conformed primary customer identifier.
+  - `hashed_email` (TEXT): Salted hash of user's email.
+  - `masked_phone` (TEXT): Obfuscated customer phone contact.
+  - `country` (TEXT): Standardized uppercase country code.
+  - `created_timestamp` (TIMESTAMP): Standardized customer creation timestamp.
+  - `updated_timestamp` (TIMESTAMP): Standardized customer profile update timestamp.
+* **Purpose**: Provides conformed, privacy-compliant user demographics for analytical marts.
+
+### `stg_users_quarantine`
+* **Source Table**: `bronze.raw_users`
+* **Transformation Logic**: Filters exclusively for critical validation failures where `id` is missing (`WHERE id IS NULL`). Hardcodes the reason text `'Critical: Null user_id (id)'`.
+* **Output Columns**:
+  - `id` (TEXT): Raw primary customer index (always null here).
+  - `first_name` (TEXT), `last_name` (TEXT), `email` (TEXT), `phone_number` (TEXT), `country_code` (TEXT): Raw unmasked demographic details.
+  - `created_at` (TIMESTAMP), `updated_at` (TIMESTAMP): Ingestion timestamps.
+  - `quarantine_reason` (TEXT): Reason for quarantine routing.
+  - `quarantined_at` (TIMESTAMP): Current execution timestamp.
+* **Purpose**: Holds broken raw records to facilitate debugging and ingestion metrics tracking.
+
+### `stg_transactions`
+* **Source Table**: `bronze.raw_transactions`
+* **Transformation Logic**:
+  * Filtering: Rejects rows with null `transaction_id` (`WHERE transaction_id IS NOT NULL`). Rejects status values matching `'test_payment'`.
+  * Correction: Multiplies negative value amounts by -1 using absolute value conversion: `ABS(CAST(amount_usd AS DECIMAL(18, 2)))`.
+* **Output Columns**:
+  - `transaction_id` (TEXT): Standardized primary transaction ID.
+  - `user_id` (TEXT): Cleaned foreign key mapping users.
+  - `transaction_amount_usd` (DECIMAL): Auto-corrected payment value in USD.
+  - `transaction_status` (TEXT): Lowercase transaction status code.
+  - `payment_method` (TEXT): Consolidated billing method string.
+  - `transaction_timestamp` (TIMESTAMP): Standardized charge timestamp.
+* **Purpose**: Represents cleaned, conformed transactional ledger entries ready for financial aggregation.
+
+### `stg_transactions_quarantine`
+* **Source Table**: `bronze.raw_transactions`
+* **Transformation Logic**: Filters exclusively for raw transactions that lack identifiers (`WHERE transaction_id IS NULL`). Hardcodes the reason text `'Critical: Null transaction_id (transaction_id)'`.
+* **Output Columns**:
+  - `transaction_id` (TEXT): Always null here.
+  - `user_id` (TEXT), `amount_usd` (NUMERIC), `status` (TEXT), `payment_method` (TEXT), `transaction_time` (TIMESTAMP): Raw transaction attributes.
+  - `quarantine_reason` (TEXT): Reason for quarantine.
+  - `quarantined_at` (TIMESTAMP): Timestamp of quarantine routing.
+* **Purpose**: Isolates raw transaction records missing transaction identifiers.
+
+---
+
+## 2. Marts dbt Models (Gold Layer)
+
+Marts aggregate transaction details and demographic segments to compute metrics for reporting and retention analytics.
+
+### `fct_user_transactions`
+* **Source Models**: `staging.stg_transactions`
+* **Aggregation Logic**: Grouped by `user_id`, filtering for `'completed'` statuses. Aggregates lifetime transaction count (`COUNT(*)`), total spend (`SUM(transaction_amount_usd)`), and latest activity (`MAX(transaction_timestamp)`).
+* **Grain of Table**: One row per unique user who completed a purchase.
+* **Business Purpose**: Tracks purchasing behavior and flags user activity updates.
+
+### `fct_user_churn`
+* **Source Models**: Joins `staging.stg_users` (demographics) with `marts.fct_user_transactions` (spend aggregates) on `user_id`.
+* **Aggregation Logic**: Uses the last active date to check active retention status:
+  ```sql
+  CASE 
+      WHEN last_active_timestamp IS NULL THEN 'CHURNED'
+      WHEN DATEDIFF('day', last_active_timestamp, CURRENT_DATE()) > 30 THEN 'CHURNED'
+      ELSE 'ACTIVE'
+  END AS churn_status
+  ```
+* **Grain of Table**: One row per unique conformed user.
+* **Business Purpose**: Serves as the primary source table for churn predictions and customer segment marketing hook reports.
+
+---
+
+## 3. Airflow DAG Workflow & Execution Logging
+
+Our orchestration pipelines run via Apache Airflow DAGs.
+
+* **DAG Naming Conventions**:
+  * Operational Pipelines: Scheduled production pipelines are suffixed with `_pipeline` (e.g. `user_analytics_pipeline`).
+  * Data Quality Runs: Pipelines triggered programmatically to run data quality checks are prefixed with `dq_etl_` followed by the target table name (e.g. `dq_etl_bronze.raw_users`).
+* **Task Dependency Chain**:
+  1. `extract_users_from_rds` & `extract_transactions_from_stripe` (Extract/Ingest raw tables)
+  2. `load_s3_to_snowflake_bronze` (Bulk-copy raw files into Bronze schema)
+  3. `dbt_run_transformations` (Build view/table stages in Staging and Marts)
+  4. `dbt_test_validations` (Assert uniqueness and data quality bounds)
+* **Execution Logs mapping to Snowflake**:
+  When a DAG begins and finishes, execution details are logged to the `public.pipeline_runs` table in Snowflake.
+* **Triggering pipeline_run Logs**:
+  * Daily scheduled runs (e.g., at 2:00 AM UTC).
+  * Manual actions triggered through Deco's control sidebar or by tools like `trigger_data_quality_check`.
+  * Logs record: `run_id`, `pipeline_name`, `status` (`SUCCESS`/`FAILED`), `start_time`, `end_time`, `duration_sec`, `error_message`, and the host file `log_path`.
+
+---
+
+## 4. ChromaDB Ingestion and Advanced indexing Pipeline
+
+Deco utilizes an advanced Retrieval-Augmented Generation (RAG) indexing and querying architecture to ensure highly precise, context-grounded answers.
+
+* **Scanned Folders**: The pipeline scans `mock_data/docs` (markdown files) and `mock_data/codebase` (dbt SQL models, Airflow DAG python scripts).
+* **Semantic Chunking (Prose)**: Markdown documents are split into parent chunks based on semantic shifts. The system tokenizes prose into sentences, generates embeddings for each sentence using the local SentenceTransformer model, and computes the cosine distance between consecutive sentences. Boundary splits are generated where the distance exceeds a dynamic threshold:
+  $$\text{Threshold} = \text{Mean Distance} + 0.8 \times \text{Standard Deviation}$$
+  Sentences are then grouped between these boundaries to form semantic parent chunks.
+* **Parent-Child Chunking Strategy**:
+  To optimize semantic retrieval, Deco indexes granular child chunks while returning the broader parent context to the LLM:
+  * **Markdown Prose**: Parent chunks are sliced into child chunks using overlapping sentence windows (window size of 2 sentences, step size of 1 sentence).
+  * **Codebase Files**: Code scripts are sliced into 30-line parent chunks (with 5 lines overlap) and 10-line child chunks (with 3 lines overlap).
+  * **Metadata Binding**: Only child chunks are embedded and registered in ChromaDB. Each child record's metadata contains the `parent_id`, `parent_text` block, and `chunk_type = 'child'`.
+* **Hybrid Search & Reciprocal Rank Fusion (RRF)**:
+  Queries execute a parallel hybrid retrieval flow:
+  1. **Vector Retrieval**: Queries ChromaDB for the top 20 nearest neighbor child chunks using cosine similarity.
+  2. **Keyword Retrieval (BM25)**: Evaluates all child chunks against the query tokens using a local BM25 scoring algorithm.
+  3. **Reciprocal Rank Fusion (RRF)**: Fuses both rankings using RRF with parameter $k = 60$:
+     $$Score_{RRF}(d) = \sum_{m \in \{\text{Vector}, \text{BM25}\}} \frac{1}{60 + \text{Rank}_{m}(d)}$$
+  4. **Parent Context Retrieval**: The top 3 chunks sorted by RRF score are selected. The system retrieves the `parent_text` associated with each child chunk, de-duplicates by `parent_id`, and feeds the final parent contexts to the LLM.
 """
 
-    # 4. Pipeline doc - User Analytics Pipeline
-    user_analytics_pipeline = """# Customer Analytics & Chern Pipeline Documentation
+    # 4. Tool API reference
+    tool_api_reference = """# tool_api_reference.md
 
-## Overview
-The Customer Analytics and Churn Pipeline is a vital data model that compiles daily activity patterns, transaction frequencies, and demographic metadata to calculate customer retention metrics and predict churn probability.
+This tool and API reference manual documents the tool definitions, parameter definitions, safety constraints, and framework schemas that define the Deco agent execution cycle.
 
-## Pipeline Flow
-1. **Ingestion (Airflow)**: Extract daily postgres updates for customer profiles and transactional events. Load them into Snowflake `raw_users` and `raw_transactions`.
-2. **Staging & Cleaning (dbt)**:
-   * `stg_users`: Cleans name strings, enforces uniform timestamps, hashes raw emails.
-   * `stg_transactions`: Verifies payment processor keys, casts floats, filters failed tests.
-3. **Marts Aggregations (dbt)**:
-   * `fct_user_transactions`: Aggregates transactions by user and day.
-   * `fct_user_churn`: Joins transaction activity with user profiles to flags users as "inactive" or "active" based on a rolling 30-day window.
+## 1. Deco Agent Tools
 
-## SLO & Data SLA Targets
-* **SLA Time**: Data must be completely refreshed and validated in `marts.fct_user_churn` daily by **08:00 UTC**.
-* **Failure Actions**: If the Airflow orchestrator fails or dbt validations fail, a Slack alert is triggered, and downstream BI reports are flagged with a "Stale Data" warning.
+Deco coordinates operations by routing natural language intents into a series of tool executions. The seven tools integrated into the agent loop are detailed below:
+
+### `search_codebase_and_docs`
+* **Purpose**: Performs RAG semantic searches across our vectorized documentation and codebase directories to extract design context.
+* **Input Parameters**:
+  - `query` (string, required): Semantic search query phrase to resolve.
+* **Backend System**: Queries ChromaDB vector store collection `deco_knowledge_base`.
+* **Returns**: Returns the top 3 semantically relevant code or documentation text chunks. The agent uses this output to formulate descriptive architectural explanations.
+* **Example Query**: *"Where is the hashing logic for email fields documented?"*
+
+### `get_table_schema`
+* **Purpose**: Retrieves schema column definitions, data types, descriptions, PII flags, and masking policies for a target table.
+* **Input Parameters**:
+  - `table_id` (string, required): Full table path name (e.g. `staging.stg_users`).
+* **Backend System**: Queries the Snowflake metadata table `public.columns` and `public.tables`.
+* **Returns**: A structured JSON object containing table stats and column properties. The agent formats this into schema tables for the user.
+* **Example Query**: *"What are the data types and PII tags of staging.stg_users?"*
+
+### `get_table_lineage`
+* **Purpose**: Traces upstream data sources and downstream consumer tables for a target table.
+* **Input Parameters**:
+  - `table_id` (string, required): The target table path (e.g. `marts.fct_user_churn`).
+  - `direction` (string, optional): Upstream source or downstream consumer path to trace (`'upstream'`, `'downstream'`, or `'both'`).
+* **Backend System**: Queries the Snowflake dependency lineage table `public.lineage`.
+* **Returns**: JSON mapping upstream tables, lineage types, and downstream target names. The agent parses this to present dependency paths.
+* **Example Query**: *"Show me the upstream data lineage for marts.fct_user_churn."*
+
+### `get_pipeline_history`
+* **Purpose**: Retrieves recent execution runs and evaluates SLO compliance targets.
+* **Input Parameters**:
+  - `limit` (integer, optional): Number of recent pipeline runs to return (defaults to 10).
+* **Backend System**: Queries Snowflake tables `public.pipeline_runs` and `public.pipeline_slo`.
+* **Returns**: Recent run durations, statuses (`SUCCESS`/`FAILED`), and SLO compliance percentages. The agent synthesizes this to identify latency anomalies.
+* **Example Query**: *"What is the recent run history and SLO compliance status for our pipeline?"*
+
+### `get_failed_run_diagnosis`
+* **Purpose**: Analyzes local execution log files to diagnose pipeline incidents and suggest resolutions.
+* **Input Parameters**:
+  - `run_id` (string/integer, required): ID of the failed execution run to diagnose.
+* **Backend System**: Parses the local log file corresponding to the run ID path stored in `public.pipeline_runs.log_path`.
+* **Returns**: The raw traceback and error lines from the log file. The agent synthesizes this log output to generate troubleshooting recommendations.
+* **Example Query**: *"Run 1002 failed. Can you read the logs and diagnose what broke?"*
+
+### `trigger_data_quality_check`
+* **Purpose**: Runs a data quality check suite against a target table in Snowflake, inserts the result run log, and returns the check outcomes.
+* **Input Parameters**:
+  - `table_id` (string, required): Target database table path to test.
+* **Backend System**: Queries table properties, registers a pipeline run status entry in `public.pipeline_runs`, and writes diagnostic assertions to local log files.
+* **Returns**: A structured summary detailing total rows, null columns, and validation outcomes. The agent displays this to confirm data integrity.
+* **Example Query**: *"Deco, run a manual data quality check on staging.stg_users."*
+
+### `nl2sql`
+* **Purpose**: Translates natural language questions into conformed SQL SELECT queries, executes them in Snowflake, and returns the query results.
+* **Input Parameters**:
+  - `nl_query` (string, required): The natural language query question to execute.
+  - `query` (string, optional): A pre-compiled SQL query string if generated by LLM reasoning.
+* **Backend System**: Translates the natural language question to a SQL string and executes it against Snowflake schemas (`BRONZE`, `STAGING`, `MARTS`, `PUBLIC`).
+* **Returns**: A formatted pandas dataframe table containing the query outputs.
+* **Example Query**: *"How many conformed records are in marts.fct_user_churn grouped by churn_status?"*
+
+---
+
+## 2. SQL Sandbox Security Enforcements
+
+The `nl2sql` tool executes queries dynamically. To prevent database corruption and restrict access to query operations, a two-layer security sandbox is enforced:
+
+1. **Blocked Keyword Blacklist**:
+   Prior to executing any query, the tool runs a check. If the SQL query contains any of the following DDL/DML keywords, it is rejected:
+   * Data Mutation/Deletions: `DELETE`, `TRUNCATE`, `INSERT`, `UPDATE`, `UPSERT`, `MERGE`, `REPLACE`
+   * Schema Modifications: `DROP`, `CREATE`, `ALTER`
+   * Access Controls: `GRANT`, `REVOKE`
+   * Code Executions: `EXEC`, `EXECUTE`
+2. **Read-Only SELECT Regex Enforcement**:
+   The query string must match a strict regex check ensuring the string begins with a read-only token:
+   * Must begin with `SELECT` or a Common Table Expression (`WITH`) syntax.
+   * Multiple query execution is blocked; only single statements are allowed.
+
+---
+
+## 3. Decoupled Tool Registration Pattern
+
+Deco uses a decoupled tool registration pattern that resembles the Model Context Protocol (MCP):
+* **Schema Definition**: Each tool is registered as a JSON schema specifying the parameter names, data types, descriptions, and required keys.
+* **Execution Mapping**: When Bedrock resolves a tool-call intent, it returns the tool name and parameter arguments. The agent core acts as a router, matching the tool name to a local python method wrapper.
+* **Decoupling Driver**: This pattern keeps LLM reasoning decoupled from the underlying database driver. The model does not manage connections or execute SQL strings directly; instead, it outputs structured JSON parameters that python execution wrappers execute.
+
+---
+
+## 4. Bedrock Converse API Loop & Observability
+
+* **Converse Loop**: The interaction uses the AWS Bedrock Converse API. When a user submits a query, the agent parses the response. If the model outputs a `toolUse` block, the agent runs the corresponding python wrapper, appends the tool result to the conversation history, and calls the Converse API again. This loop runs until the model returns a final text output.
+* **Default LLM Model**: `amazon.nova-lite-v1:0` (with fallback to `amazon.nova-pro-v1:0` for complex reasoning).
+* **Langfuse Tracing**: The Langfuse SDK wraps both the Converse API and the local python tool wrappers. Each run maps parent spans (user prompt) to child spans (individual tool latency, SQL query execution times, token counts) to trace agent costs and query performance.
+
+---
+
+## 5. Streamlit Frontend Integration
+
+The Streamlit control panel integrates with our Snowflake metadata tables and agent tools:
+
+* **Data Catalog Tab**: Powered by `MetadataHelper.get_all_tables()` and `MetadataHelper.get_table_details()`. Displays dynamic table sizes (MB) and row counts by reading `public.tables` in Snowflake.
+* **Data Lineage Tab**: Powered by `MetadataHelper.get_lineage()`. It traces upstream and downstream nodes by querying the `public.lineage` table.
+* **Operations & SLOs Tab**: Powered by `MetadataHelper.get_pipeline_history()` and `MetadataHelper.get_pipeline_slo_compliance()`. It calculates success rates and checks SLA thresholds.
+* **Chat with Deco Tab**: Integrates with the `AgentCore` loop, rendering the conversation log. Uses a custom parser to extract and render the model's `<thinking>` tags in a collapsible expander.
+* **DQ Trigger Sidebar**: Provides a dropdown to select a target table and trigger a test run. This calls `MetadataHelper.run_dq_etl_pipeline()`, which runs validation logic, inserts records to `public.pipeline_runs`, and surfaces outcomes in the chat.
 """
 
     # Write files
     with open("mock_data/docs/architecture_overview.md", "w") as f:
         f.write(architecture_overview)
-    with open("mock_data/docs/design_decisions/pii_governance.md", "w") as f:
-        f.write(pii_governance)
-    with open("mock_data/docs/design_decisions/orchestration_choices.md", "w") as f:
-        f.write(orchestration_choices)
-    with open("mock_data/docs/pipelines/customer_churn_pipeline.md", "w") as f:
-        f.write(user_analytics_pipeline)
+    with open("mock_data/docs/data_governance_policy.md", "w") as f:
+        f.write(data_governance_policy)
+    with open("mock_data/docs/codebase_reference.md", "w") as f:
+        f.write(codebase_reference)
+    with open("mock_data/docs/tool_api_reference.md", "w") as f:
+        f.write(tool_api_reference)
         
     print("Created mock markdown docs.")
 
