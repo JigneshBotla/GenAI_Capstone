@@ -244,7 +244,7 @@ snowflake_data = st.session_state.snowflake_data
 
 # ----------------- SIDEBAR CONFIG -----------------
 with st.sidebar:
-    st.image("artificial-intelligence.png", width=75)
+    st.image("./artificial-intelligence.png", width=75)
     st.title("Deco Engine Control")
     st.caption("Settings & Integration Hub")
     st.markdown("---")
