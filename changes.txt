@@ -11,3 +11,7 @@ LANGFUSE_BASE_URL="https://us.cloud.langfuse.com"
 Public key:pk-lf-18f10c0e-458e-4120-8e82-2656ba2e2172
 
 Secret key:sk-lf-3be7acf8-ef72-412a-b7ad-7dd9dd581443
+
+
+connection to snowflake i have my credentials in my .env use them to connect
+create these tables: lineage, pipeline_runs, pipeline_slo (take reference from )

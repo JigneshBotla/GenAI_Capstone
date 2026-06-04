@@ -1,43 +1,70 @@
-import sqlite3
 import os
+import snowflake.connector
+from dotenv import load_dotenv
 import chromadb
 from chromadb.utils import embedding_functions
 import pandas as pd
 
+# Load environment variables
+load_dotenv()
+
 class MetadataHelper:
-    """Helper class to query the structured SQLite database containing DE catalog, lineage, and run logs."""
+    """Helper class to query the structured Snowflake database containing DE catalog, lineage, and run logs."""
     
-    def __init__(self, db_path="mock_data/metadata.db"):
-        self.db_path = db_path
+    def __init__(self):
+        self.account = os.getenv("SNOWFLAKE_ACCOUNT")
+        self.user = os.getenv("SNOWFLAKE_USER")
+        self.password = os.getenv("SNOWFLAKE_PASSWORD")
+        self.database = os.getenv("SNOWFLAKE_DATABASE", "Capstone_DB")
+        self.warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", "SIGMA_WH")
+
+    def _get_connection(self):
+        if not self.account or not self.user or not self.password:
+            raise ValueError("Missing Snowflake credentials. Please check your .env file.")
+        return snowflake.connector.connect(
+            account=self.account,
+            user=self.user,
+            password=self.password,
+            database=self.database,
+            warehouse=self.warehouse
+        )
 
     def _execute_query(self, query, params=()):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute(query, params)
-            columns = [col[0] for col in cursor.description]
-            results = [dict(zip(columns, row)) for row in cursor.fetchall()]
-            return results
+            if cursor.description:
+                # SELECT queries: map uppercase Snowflake column names to lowercase keys for compatibility
+                columns = [col[0].lower() for col in cursor.description]
+                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                return results
+            else:
+                # INSERT/UPDATE/DELETE: commit and return rowcount
+                conn.commit()
+                return cursor.rowcount
         except Exception as e:
+            print(f"Error executing Snowflake query: {e}")
             return {"error": str(e)}
         finally:
+            cursor.close()
             conn.close()
 
     def get_all_tables(self):
         """Retrieve all registered tables in the data catalog."""
-        query = "SELECT table_id, schema_name, table_name, description, row_count, size_bytes FROM tables"
+        query = "SELECT table_id, schema_name, table_name, description, row_count, size_bytes FROM public.tables"
         return self._execute_query(query)
 
     def get_table_details(self, table_id):
         """Retrieve schema, descriptions, and PII tags for a single table."""
         # 1. Fetch table details
-        table_info = self._execute_query("SELECT * FROM tables WHERE table_id = ?", (table_id,))
+        table_info = self._execute_query("SELECT * FROM public.tables WHERE table_id = %s", (table_id,))
         if not table_info or "error" in table_info:
             return None
         
         # 2. Fetch column details
         columns_info = self._execute_query(
-            "SELECT column_name, data_type, description, is_pii, pii_type, masking_policy FROM columns WHERE table_id = ?", 
+            "SELECT column_name, data_type, description, is_pii, pii_type, masking_policy FROM public.columns WHERE table_id = %s", 
             (table_id,)
         )
         
@@ -50,9 +77,9 @@ class MetadataHelper:
         """Find all columns flagged as containing PII along with their masking policies."""
         query = """
             SELECT c.table_id, c.column_name, c.data_type, c.pii_type, c.masking_policy, t.description as table_desc 
-            FROM columns c
-            JOIN tables t ON c.table_id = t.table_id
-            WHERE c.is_pii = 1
+            FROM public.columns c
+            JOIN public.tables t ON c.table_id = t.table_id
+            WHERE c.is_pii = TRUE
         """
         return self._execute_query(query)
 
@@ -69,13 +96,13 @@ class MetadataHelper:
         # Find upstream tables (where target_table is our table_id)
         if direction in ("upstream", "both"):
             upstream = self._execute_query(
-                "SELECT source_table, lineage_type FROM lineage WHERE target_table = ?", (table_id,)
+                "SELECT source_table, lineage_type FROM public.lineage WHERE target_table = %s", (table_id,)
             )
             
         # Find downstream tables (where source_table is our table_id)
         if direction in ("downstream", "both"):
             downstream = self._execute_query(
-                "SELECT target_table, lineage_type FROM lineage WHERE source_table = ?", (table_id,)
+                "SELECT target_table, lineage_type FROM public.lineage WHERE source_table = %s", (table_id,)
             )
             
         return {
@@ -88,9 +115,9 @@ class MetadataHelper:
         """Retrieve recent pipeline run history."""
         query = """
             SELECT run_id, pipeline_name, status, start_time, end_time, duration_sec, error_message, log_path 
-            FROM pipeline_runs 
+            FROM public.pipeline_runs 
             ORDER BY run_id DESC 
-            LIMIT ?
+            LIMIT %s
         """
         return self._execute_query(query, (limit,))
 
@@ -98,7 +125,7 @@ class MetadataHelper:
         """Fetch details of the latest failed pipeline run to help with troubleshooting."""
         query = """
             SELECT run_id, pipeline_name, status, start_time, end_time, duration_sec, error_message, log_path 
-            FROM pipeline_runs 
+            FROM public.pipeline_runs 
             WHERE status = 'FAILED'
             ORDER BY run_id DESC 
             LIMIT 1
@@ -109,9 +136,12 @@ class MetadataHelper:
     def get_pipeline_slo_compliance(self):
         """Evaluate SLO status based on execution history."""
         # 1. Fetch configured SLO targets
-        slo_targets = self._execute_query("SELECT * FROM pipeline_slo")
+        slo_targets = self._execute_query("SELECT * FROM public.pipeline_slo")
         
         compliance_report = []
+        if isinstance(slo_targets, dict) and "error" in slo_targets:
+            return compliance_report
+
         for target in slo_targets:
             p_name = target["pipeline_name"]
             sla_time_str = target["sla_target_time"]
@@ -119,11 +149,11 @@ class MetadataHelper:
             
             # Fetch last 5 runs
             runs = self._execute_query(
-                "SELECT status, start_time, duration_sec FROM pipeline_runs WHERE pipeline_name = ? ORDER BY run_id DESC LIMIT 5",
+                "SELECT status, start_time, duration_sec FROM public.pipeline_runs WHERE pipeline_name = %s ORDER BY run_id DESC LIMIT 5",
                 (p_name,)
             )
             
-            if not runs:
+            if not runs or isinstance(runs, dict) and "error" in runs:
                 continue
                 
             success_count = sum(1 for r in runs if r["status"] == "SUCCESS")
@@ -147,21 +177,31 @@ class MetadataHelper:
 
     def insert_pipeline_run(self, pipeline_name, status, start_time, end_time, duration_sec, error_message, log_path):
         """Programmatically insert a new pipeline run. Perfect for showing agentic actions in real time."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute(
                 """
-                INSERT INTO pipeline_runs (pipeline_name, status, start_time, end_time, duration_sec, error_message, log_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO public.pipeline_runs (pipeline_name, status, start_time, end_time, duration_sec, error_message, log_path)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (pipeline_name, status, start_time, end_time, duration_sec, error_message, log_path)
             )
+            # Retrieve generated IDENTITY/run_id value
+            cursor.execute("SELECT LAST_QUERY_ID()")
+            q_id = cursor.fetchone()[0]
+            
+            cursor.execute(f"SELECT run_id FROM public.pipeline_runs WHERE run_id = (SELECT max(run_id) FROM public.pipeline_runs)")
+            row = cursor.fetchone()
+            run_id = row[0] if row else None
+            
             conn.commit()
-            return cursor.lastrowid
+            return run_id
         except Exception as e:
+            print(f"Error inserting pipeline run: {e}")
             return {"error": str(e)}
         finally:
+            cursor.close()
             conn.close()
 
 
@@ -171,8 +211,6 @@ class VectorStoreHelper:
     def __init__(self, db_dir="mock_data/chromadb_store"):
         self.db_dir = db_dir
         self.client = chromadb.PersistentClient(path=db_dir)
-        # Using ChromaDB's default embedding function (SentenceTransformer all-MiniLM-L6-v2)
-        # It runs 100% locally and is extremely fast!
         self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
         
     def get_or_create_collection(self, name="deco_knowledge_base"):
@@ -197,13 +235,11 @@ class VectorStoreHelper:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
                         
-                    # Basic markdown chunking by top-level headers (H1/H2) to preserve context
                     chunks = content.split("\n## ")
                     for i, chunk in enumerate(chunks):
                         if not chunk.strip():
                             continue
                         
-                        # Add back the markdown header prefix if it's a split section
                         chunk_text = ("## " + chunk) if i > 0 else chunk
                         
                         documents.append(chunk_text)
@@ -238,8 +274,6 @@ class VectorStoreHelper:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
                         
-                    # Store files as complete chunks since they are relatively small
-                    # This preserves absolute context of dbt/Airflow files.
                     documents.append(content)
                     metadatas.append({
                         "source_file": rel_path,
@@ -277,35 +311,3 @@ class VectorStoreHelper:
                     "distance": dist
                 })
         return formatted_results
-
-
-# Self-test script to index resources when executed directly
-if __name__ == "__main__":
-    print("Initializing databases...")
-    meta_helper = MetadataHelper()
-    print("Testing MetadataHelper connection:")
-    tables = meta_helper.get_all_tables()
-    print(f"  Found {len(tables)} tables in Data Catalog:")
-    for t in tables:
-        print(f"    - {t['table_id']} ({t['row_count']} rows)")
-        
-    print("\nInitializing ChromaDB Vector Store...")
-    vector_helper = VectorStoreHelper()
-    
-    print("Indexing Markdown documentation files...")
-    doc_count = vector_helper.load_markdown_docs()
-    print(f"  Successfully indexed {doc_count} documentation chunks.")
-    
-    print("Indexing pipeline codebase (dbt + Airflow files)...")
-    code_count = vector_helper.load_codebase()
-    print(f"  Successfully indexed {code_count} codebase files.")
-    
-    print("\nRunning semantic search test: 'Why do we hash emails?'")
-    search_results = vector_helper.query("Why do we hash emails?", n_results=2)
-    for i, r in enumerate(search_results):
-        print(f"\nResult {i+1} [Source: {r['metadata']['source_file']}, Score: {r['distance']:.4f}]:")
-        # Print first 200 characters of matching block
-        snippet = r['content'][:250].replace('\n', ' ')
-        print(f"  {snippet}...")
-    
-    print("\nDatabases initialized and indexed successfully!")

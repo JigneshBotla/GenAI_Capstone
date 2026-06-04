@@ -1,6 +1,5 @@
 import boto3
 import json
-import sqlite3
 import datetime
 import os
 from database_manager import MetadataHelper, VectorStoreHelper
@@ -46,7 +45,7 @@ class AgentCore:
             self.has_aws = False
 
         # Model identifier
-        self.model_id = "amazon.nova-pro-v1:0"
+        self.model_id = "amazon.nova-lite-v1:0"
 
         # Register tools mapping
         self.tools_map = {
@@ -171,17 +170,17 @@ class AgentCore:
             {
                 "toolSpec": {
                     "name": "nl2sql",
-                    "description": "Executes standard database queries (SELECT/WITH only) on the metadata SQLite database. Use this when the user asks for specific custom metrics or metadata queries not covered by other tools. Strictly blocked for DDL/DML write queries.",
+                    "description": "Translates a user's natural language question (e.g., 'how many tables are there', 'how many transactions are there') into a Snowflake SELECT query, executes it, and returns the query and results. The input must be a natural language question, NOT raw SQL. Do NOT write SQL yourself when calling this tool.",
                     "inputSchema": {
                         "json": {
                             "type": "object",
                             "properties": {
-                                "query": {
+                                "nl_query": {
                                     "type": "string",
-                                    "description": "The SQLite SELECT query to execute."
+                                    "description": "The natural language question describing the needed query. Do NOT write SQL here; write a natural language question."
                                 }
                             },
-                            "required": ["query"]
+                            "required": ["nl_query"]
                         }
                     }
                 }
@@ -381,12 +380,127 @@ class AgentCore:
         
         return output
 
-    def tool_nl2sql(self, query):
+    def translate_nl_to_sql(self, nl_query):
+        """Translates natural language to Snowflake SQL using Bedrock Nova Pro."""
+        if not self.has_aws or not self.bedrock_client:
+            raise ValueError("AWS credentials not configured. Cannot run Bedrock Nova Pro model.")
+
+        system_prompt = """You are a Snowflake SQL translation expert.
+Your ONLY job is to translate the user's natural language request into a single valid 
+Snowflake SELECT query against Capstone_DB.
+
+CRITICAL OUTPUT RULES:
+- Output ONLY the raw SQL query. No explanations, no markdown, no comments, no tool calls.
+- Never say you cannot answer. Never suggest the user run the query themselves.
+- Never call any tools or functions. Never search for anything.
+- If the request is ambiguous, make the most reasonable assumption and write the SQL.
+
+QUERY RULES:
+1. Only write SELECT or WITH queries.
+
+2. STRICT TABLE USAGE: You MUST only query tables explicitly listed in the DATABASE SCHEMA 
+   below. Never invent, guess, or use any table name not in this list.
+
+3. SMART TABLE RESOLUTION: Users may refer to tables using informal, partial, or different 
+   names. You must analyse the intent and map it to the correct listed table using these rules:
+
+   LAYER RESOLUTION EXAMPLES:
+   - "nulls", "missing values", "raw data", "landing data"
+     → bronze layer: Capstone_DB.bronze.raw_users or Capstone_DB.bronze.raw_transactions
+     Reason: Raw/dirty data with nulls lives in bronze before cleaning.
+
+   - "clean users", "valid users", "user list", "customers"
+     → Capstone_DB.staging.stg_users
+     Reason: Cleaned and conformed user records live in staging.
+
+   - "rejected", "bad records", "quarantined", "failed validation"
+     → Capstone_DB.staging.stg_users_quarantine or Capstone_DB.staging.stg_transactions_quarantine
+     Reason: Records that failed ETL checks are routed to quarantine tables.
+
+   - "spend", "lifetime spend", "most spent", "top spenders", "transaction summary"
+     → Capstone_DB.marts.fct_user_transactions
+     Reason: Aggregated per-user spend lives in the marts layer.
+
+   - "churned", "inactive users", "active users", "churn status"
+     → Capstone_DB.marts.fct_user_churn
+     Reason: Churn classification per user lives in the marts layer.
+
+   - "pipeline", "runs", "job status", "ETL status", "failed runs", "success runs"
+     → Capstone_DB.public.pipeline_runs
+     Reason: Pipeline execution history lives here.
+
+   - "SLA", "SLO", "pipeline targets", "max duration"
+     → Capstone_DB.public.pipeline_slo
+     Reason: Pipeline SLA/SLO targets are defined here.
+
+   - "schema info", "table info", "catalog", "metadata", "what columns"
+     → Capstone_DB.public.tables or Capstone_DB.public.columns
+     Reason: Data catalog metadata lives in public schema.
+
+   - "lineage", "dependencies", "source of", "upstream", "downstream"
+     → Capstone_DB.public.lineage
+
+4. CONFIRMATION RULE: If the user's request is too vague to confidently resolve to a single 
+   listed table — even after applying the layer resolution rules above — do NOT guess or 
+   fabricate a table. Instead, respond with a plain English question asking the user to 
+   clarify which table or data they mean, referencing the available options.
+   Example: "Did you mean spend data from marts.fct_user_transactions, or raw transaction 
+   records from bronze.raw_transactions?"
+
+5. Always use fully qualified table names with the Capstone_DB prefix
+   (e.g. Capstone_DB.bronze.raw_users, Capstone_DB.marts.fct_user_transactions).
+   Never use unqualified names like 'users', 'transactions', or 'runs'.
+
+6. String comparisons are case-sensitive in Snowflake.
+   pipeline_runs.status uses uppercase: 'SUCCESS' or 'FAILED'.
+
+7. bronze.raw_users uses column 'id' (not 'user_id'). Staging/marts tables use 'user_id'.
+
+DATABASE SCHEMA (Capstone_DB) — ONLY THESE TABLES MAY BE QUERIED:
+- bronze.raw_users (id, first_name, last_name, email, phone_number, country_code, created_at, updated_at)
+- bronze.raw_transactions (transaction_id, user_id, amount_usd, status, payment_method, transaction_time)
+- staging.stg_users (user_id, hashed_email, masked_phone, country, created_timestamp, updated_timestamp)
+- staging.stg_users_quarantine (id, first_name, last_name, email, phone_number, country_code, created_at, updated_at, quarantine_reason, quarantined_at)
+- staging.stg_transactions (transaction_id, user_id, transaction_amount_usd, transaction_status, payment_method, transaction_timestamp)
+- staging.stg_transactions_quarantine (transaction_id, user_id, amount_usd, status, payment_method, transaction_time, quarantine_reason, quarantined_at)
+- marts.fct_user_transactions (user_id, lifetime_transaction_count, lifetime_spend_usd, last_active_timestamp)
+- marts.fct_user_churn (user_id, hashed_email, country, tx_count, spend_amount, last_active_timestamp, churn_status)
+- public.tables (table_id, schema_name, table_name, description, row_count, size_bytes)
+- public.columns (table_id, column_name, data_type, description, is_pii, pii_type, masking_policy)
+- public.lineage (source_table, target_table, lineage_type)
+- public.pipeline_runs (run_id, pipeline_name, status, start_time, end_time, duration_sec, error_message, log_path)
+- public.pipeline_slo (pipeline_name, sla_target_time, max_duration_sec, slo_percentage_target)
+"""
+        
+        try:
+            response = self.bedrock_client.converse(
+                modelId=self.model_id,
+                messages=[{"role": "user", "content": [{"text": nl_query}]}],
+                system=[{"text": system_prompt}],
+                inferenceConfig={"temperature": 0.0, "maxTokens": 500}
+            )
+            sql_text = response["output"]["message"]["content"][0]["text"].strip()
+            if "```" in sql_text:
+                sql_text = sql_text.replace("```sql", "").replace("```", "").strip()
+            return sql_text
+        except Exception as e:
+            print(f"Error translating NL to SQL: {e}")
+            raise e
+
+    def tool_nl2sql(self, nl_query=None, query=None):
+        target_query = nl_query if nl_query is not None else query
+        if not target_query:
+            return "Error: No query provided to nl2sql tool."
+            
+        try:
+            sql_query = self.translate_nl_to_sql(target_query)
+        except Exception as e:
+            return f"Error translating NL to SQL: {e}"
+
         import re
-        # Clean query comments and whitespace
-        clean_query = re.sub(r'(--.*)|(/\*[\s\S]*?\*/)', '', query).strip()
+        clean_query = re.sub(r'(--.*)|(/\*[\s\S]*?\*/)', '', sql_query).strip()
         if not clean_query:
-            return "Error: Query is empty."
+            return "Error: Generated query is empty."
             
         words = set(re.findall(r'\b\w+\b', clean_query.lower()))
         restricted_keywords = {
@@ -396,21 +510,22 @@ class AgentCore:
         
         intersect = words.intersection(restricted_keywords)
         if intersect:
-            return f"Security Error: Query contains restricted keywords/commands: {', '.join(intersect)}"
+            return f"Security Error: Generated query contains restricted keywords: {', '.join(intersect)}"
         
         first_word_match = re.match(r'^\s*(\w+)', clean_query)
         if not first_word_match or first_word_match.group(1).lower() not in ('select', 'with'):
-            return "Security Error: Only SELECT or WITH queries are permitted."
+            return f"Security Error: Only SELECT or WITH queries are permitted.\nGenerated SQL: `{sql_query}`"
             
-        results = self.metadata_helper._execute_query(query)
+        results = self.metadata_helper._execute_query(sql_query)
         if isinstance(results, dict) and "error" in results:
-            return f"Database Error: {results['error']}"
+            return f"Database Error: {results['error']}\nGenerated SQL: `{sql_query}`"
         
         if not results:
-            return "Query executed successfully. Result: 0 rows returned."
+            return f"Generated SQL Query:\n```sql\n{sql_query}\n```\n\nQuery executed successfully. Result: 0 rows returned."
             
         columns = list(results[0].keys())
-        output = "### Custom Query Execution Results:\n\n"
+        output = f"Generated SQL Query:\n```sql\n{sql_query}\n```\n\n"
+        output += "### Custom Query Execution Results:\n\n"
         output += "| " + " | ".join(columns) + " |\n"
         output += "| " + " | ".join(["---"] * len(columns)) + " |\n"
         for row in results:
@@ -419,165 +534,22 @@ class AgentCore:
             
         return output
 
+    def _parse_thinking_and_content(self, text):
+        import re
+        thinking_match = re.search(r'<thinking>(.*?)</thinking>', text, re.DOTALL)
+        if thinking_match:
+            thought_content = thinking_match.group(1).strip()
+            final_content = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL).strip()
+            return thought_content, final_content
+        else:
+            return "", text.strip()
+
     # --- Agent Execution Core Loop ---
     
-    def simulate_agent_locally(self, user_prompt, chat_history=None, callback=None):
-        """Simulates LLM reasoning locally in case AWS Credentials are not set up.
-        This provides a highly elegant, interactive fallback that keeps the Streamlit app fully functional!"""
-        
-        trace_ctx = None
-        if hasattr(self, "langfuse") and self.langfuse:
-            try:
-                trace_ctx = self.langfuse.start_as_current_observation(
-                    as_type="span",
-                    name="deco-agent-local",
-                    input={"user_prompt": user_prompt}
-                )
-                trace_ctx.__enter__()
-            except Exception as e:
-                print(f"Warning: Langfuse trace failed to initialize locally: {e}")
-                trace_ctx = None
-
-        try:
-            prompt_lower = user_prompt.lower()
-            tool_name = "search_codebase_and_docs"
-            tool_args = {"query": user_prompt}
-            
-            # 1. Pipeline status / health / run Q&A
-            if any(w in prompt_lower for w in ("run", "status", "health", "history", "fail", "broken", "incident")):
-                if "fail" in prompt_lower or "broken" in prompt_lower or "diagnose" in prompt_lower:
-                    tool_name = "get_failed_run_diagnosis"
-                    tool_args = {}
-                    reasoning = "The user is asking to troubleshoot a broken pipeline. I will read the latest failed pipeline run logs, explain what broke, and suggest immediate mitigations."
-                else:
-                    tool_name = "get_pipeline_history"
-                    tool_args = {"limit": 5}
-                    reasoning = "The user wants to inspect our pipeline health and run history. I will query the pipeline monitoring log database."
-                    
-            # 2. Trigger Quality Check (Agentic Action)
-            elif "trigger" in prompt_lower or "quality" in prompt_lower or "check" in prompt_lower or "test" in prompt_lower:
-                table = "staging.stg_users"
-                if "churn" in prompt_lower or "fct" in prompt_lower:
-                    table = "marts.fct_user_churn"
-                tool_name = "trigger_data_quality_check"
-                tool_args = {"table_id": table}
-                reasoning = f"The user requested to trigger an active data quality run. I will invoke `trigger_data_quality_check` on table `{table}` and register this run."
-                
-            # 3. Data catalog / schema lookup
-            elif any(w in prompt_lower for w in ("schema", "columns", "catalog", "table", "pii", "mask")):
-                table = "staging.stg_users"
-                if "churn" in prompt_lower or "fct" in prompt_lower:
-                    table = "marts.fct_user_churn"
-                elif "raw" in prompt_lower or "bronze" in prompt_lower:
-                    table = "bronze.raw_users"
-                    
-                if "pii" in prompt_lower or "mask" in prompt_lower:
-                    tool_name = "get_pii_columns"
-                    tool_args = {}
-                    reasoning = "The user is asking about PII classification policies. I will scan our data catalog database for columns flagged as PII."
-                else:
-                    tool_name = "get_table_schema"
-                    tool_args = {"table_id": table}
-                    reasoning = f"The user is asking for the schema of table `{table}`. I will lookup the conformed data catalog catalog."
-
-            # 4. Custom SQL / nl2sql
-            elif any(w in prompt_lower for w in ("select", "query", "sql", "database")):
-                import re
-                sql_match = re.search(r'(select\s+[\s\S]+)', user_prompt, re.IGNORECASE)
-                if sql_match:
-                    query = sql_match.group(1)
-                else:
-                    query = "SELECT * FROM tables LIMIT 3;"
-                tool_name = "nl2sql"
-                tool_args = {"query": query}
-                reasoning = f"The user wants to run a custom SQL query on the database. I will invoke the `nl2sql` tool for query: {query}"
-                
-            # 5. Lineage Q&A
-            elif "lineage" in prompt_lower or "dependency" in prompt_lower or "flow" in prompt_lower or "upstream" in prompt_lower or "downstream" in prompt_lower:
-                table = "marts.fct_user_churn"
-                if "user" in prompt_lower:
-                    table = "staging.stg_users"
-                tool_name = "get_table_lineage"
-                tool_args = {"table_id": table}
-                reasoning = f"The user is inquiring about data lineage dependencies. I will fetch the lineage paths for `{table}`."
-                
-            # 6. Semantic codebase / architecture search (RAG)
-            else:
-                reasoning = f"The user is asking a general Q&A question about design decisions. I will query the ChromaDB vector database for matching documentation blocks."
-                tool_name = "search_codebase_and_docs"
-                tool_args = {"query": user_prompt}
-
-            # Fire callbacks for progress dropdown
-            if callback:
-                callback("thought", reasoning)
-                callback("tool_start", {"name": tool_name, "args": tool_args})
-
-            # Track in Langfuse trace span if trace is active
-            tool_ctx = None
-            if trace_ctx:
-                try:
-                    tool_ctx = self.langfuse.start_as_current_observation(
-                        as_type="tool",
-                        name=tool_name,
-                        input=tool_args
-                    )
-                    tool_ctx.__enter__()
-                except Exception as e:
-                    print(f"Warning: Langfuse span failed to start locally: {e}")
-                    tool_ctx = None
-                
-            # Run tool
-            if tool_name == "get_pii_columns":
-                cols = self.metadata_helper.get_pii_columns()
-                tool_output = "### 🚨 PII Catalog & Governance Mappings\n\n"
-                tool_output += "| Table ID | Column | Data Type | PII Classification | Masking Rule |\n"
-                tool_output += "| --- | --- | --- | --- | --- |\n"
-                for c in cols:
-                    tool_output += f"| `{c['table_id']}` | `{c['column_name']}` | `{c['data_type']}` | **{c['pii_type']}** | `{c['masking_policy']}` |\n"
-            elif tool_name in self.tools_map:
-                try:
-                    tool_output = self.tools_map[tool_name](**tool_args)
-                except Exception as e:
-                    tool_output = f"Error running local tool {tool_name}: {e}"
-            else:
-                # Fallback
-                tool_output = self.tool_search_codebase_and_docs(user_prompt)
-
-            if callback:
-                callback("tool_end", {"name": tool_name, "result": tool_output})
-
-            if tool_ctx:
-                try:
-                    self.langfuse.update_current_span(output=str(tool_output))
-                    tool_ctx.__exit__(None, None, None)
-                except Exception as e:
-                    print(f"Warning: Langfuse span failed to end locally: {e}")
-
-            final_prompt = f"""[DECO LOCAL REASONING ENGINE]
-{tool_output}
-
-*Note: Deco is currently running in local offline mode because AWS Bedrock credentials were not configured. The interface remains fully functional with local mocks.*"""
-            
-            if trace_ctx:
-                try:
-                    self.langfuse.update_current_span(output=final_prompt)
-                except:
-                    pass
-
-            return final_prompt
-
-        finally:
-            if trace_ctx:
-                try:
-                    trace_ctx.__exit__(None, None, None)
-                    self.langfuse.flush()
-                except:
-                    pass
-
     def run_agent(self, user_prompt, chat_history=None, callback=None):
-        """Orchestrates agent execution. Attempts AWS Bedrock (Nova Pro) tool loop first; if not configured or raises error, falls back to local simulation."""
+        """Orchestrates agent execution. Attempts AWS Bedrock (Nova Pro/Lite) tool loop."""
         if not self.has_aws or not self.bedrock_client:
-            return self.simulate_agent_locally(user_prompt, chat_history, callback)
+            raise ValueError("AWS Bedrock client is not initialized. Please verify your credentials.")
             
         trace_ctx = None
         if hasattr(self, "langfuse") and self.langfuse:
@@ -595,6 +567,24 @@ class AgentCore:
         try:
             # Construct system instructions
             system_prompt = """You are "Deco", an advanced AI Data Engineering Co-pilot. Your purpose is to assist data platform engineers.
+
+DATABASE SYSTEM CONTEXT:
+Our platform is built on Snowflake (database name: Capstone_DB). All data catalog tables, pipeline runs, and SLOs are stored in Snowflake.
+The conformed tables in Snowflake (Capstone_DB) are:
+- bronze.raw_users (id, first_name, last_name, email, phone_number, country_code, created_at, updated_at) - Raw user registrations.
+- bronze.raw_transactions (transaction_id, user_id, amount_usd, status, payment_method, transaction_time) - Raw transactions.
+- staging.stg_users (user_id, hashed_email, masked_phone, country, created_timestamp, updated_timestamp) - Cleaned conformed users.
+- staging.stg_users_quarantine (id, first_name, last_name, email, phone_number, country_code, created_at, updated_at, quarantine_reason, quarantined_at) - Quarantined user records.
+- staging.stg_transactions (transaction_id, user_id, transaction_amount_usd, transaction_status, payment_method, transaction_timestamp) - Cleaned transactions.
+- staging.stg_transactions_quarantine (transaction_id, user_id, amount_usd, status, payment_method, transaction_time, quarantine_reason, quarantined_at) - Quarantined transaction records.
+- marts.fct_user_transactions (user_id, lifetime_transaction_count, lifetime_spend_usd, last_active_timestamp) - User activity summaries.
+- marts.fct_user_churn (user_id, hashed_email, country, tx_count, spend_amount, last_active_timestamp, churn_status) - User churn segments.
+- public.tables (table_id, schema_name, table_name, description, row_count, size_bytes) - Data catalog tables.
+- public.columns (table_id, column_name, data_type, description, is_pii, pii_type, masking_policy) - Column definitions.
+- public.lineage (source_table, target_table, lineage_type) - Upstream/downstream table lineages.
+- public.pipeline_runs (run_id, pipeline_name, status, start_time, end_time, duration_sec, error_message, log_path) - Execution logs.
+- public.pipeline_slo (pipeline_name, sla_target_time, max_duration_sec, slo_percentage_target) - Pipeline SLA definitions.
+
 You have access to a rich set of database and vector-store tools:
 1. `search_codebase_and_docs`: Queries the vector database (ChromaDB) for pipeline documentation, design records, and dbt/Airflow files.
 2. `get_table_schema`: Queries data schemas, descriptions, and PII markers for tables.
@@ -602,13 +592,14 @@ You have access to a rich set of database and vector-store tools:
 4. `get_pipeline_history`: Displays execution state and recent run metrics.
 5. `get_failed_run_diagnosis`: Analyzes error logs from failing pipelines and provides recommendations.
 6. `trigger_data_quality_check`: Runs an active quality test suite on a specific table, logs results, and returns test statuses.
-7. `nl2sql`: Executes standard database queries (SELECT/WITH only) on the metadata SQLite database. Use this when the user asks for specific custom metrics or metadata queries not covered by other tools.
+7. `nl2sql`: Translates a user's natural language query about tables, transactions, pipeline runs, or catalog metadata into a Snowflake SELECT query, executes it, and returns the query and results. Use this when the user asks for specific custom metrics, record checks, or metadata queries not covered by other tools.
 
 Follow a clean tool-use loop:
 - First, analyze what the user needs.
 - If they ask for schemas, lineage, or logs, use the specific database tools. Do NOT hallucinate names or types.
 - If they ask general architecture questions, use search_codebase_and_docs.
-- If they request custom reports or custom queries, use nl2sql to run SELECT queries on metadata tables.
+- If they request custom reports or custom queries, use nl2sql.
+- IMPORTANT FOR NL2SQL: When calling 'nl2sql', you must ALWAYS pass the user's natural language question (e.g. 'how many tables are there') as the 'nl_query' parameter. Do NOT write or generate SQL yourself when calling 'nl2sql'; the tool will perform the translation and run it against Snowflake automatically.
 - Provide professional, structured responses in clean Markdown. Present tables clearly.
 - Ground your suggestions in the active outputs of the tools."""
 
@@ -659,7 +650,7 @@ Follow a clean tool-use loop:
                     try:
                         gen_ctx = self.langfuse.start_as_current_observation(
                             as_type="generation",
-                            name="amazon.nova-pro-v1:0",
+                            name="amazon.nova-lite-v1:0",
                             model=self.model_id,
                             input=messages,
                             model_parameters={"temperature": 0.1}
@@ -693,13 +684,17 @@ Follow a clean tool-use loop:
                         print(f"Warning: Langfuse generation failed to end: {e}")
 
                 # Extract reasoning text (thinking) if present
-                thinking = ""
+                full_text = ""
                 for part in output_message.get("content", []):
                     if "text" in part:
-                        thinking += part["text"]
+                        full_text += part["text"]
                 
-                if thinking and callback:
-                    callback("thought", thinking)
+                stop_reason = response.get("stopReason")
+                thought_content, final_content = self._parse_thinking_and_content(full_text)
+                if thought_content and callback:
+                    callback("thought", thought_content)
+                elif not thought_content and full_text and callback and stop_reason == "tool_use":
+                    callback("thought", full_text)
                 
                 # Check if model requested a tool call
                 stop_reason = response["stopReason"]
@@ -765,32 +760,32 @@ Follow a clean tool-use loop:
                     })
                 else:
                     # Model returned a final textual response!
-                    final_res = None
-                    for part in output_message["content"]:
+                    full_text = ""
+                    for part in output_message.get("content", []):
                         if "text" in part:
-                            final_res = part["text"]
-                            break
-                    if final_res is None:
-                        final_res = "Deco was unable to formulate a textual response."
+                            full_text += part["text"]
+                    
+                    thought_content, final_content = self._parse_thinking_and_content(full_text)
+                    if final_content == "":
+                        final_content = "Deco was unable to formulate a textual response."
                         
                     if trace_ctx:
                         try:
-                            self.langfuse.update_current_span(output=final_res)
+                            self.langfuse.update_current_span(output=final_content)
                         except:
                             pass
                             
-                    return final_res
+                    return final_content
                     
             return "Loop limit reached before agent could formulate a final response."
             
         except Exception as e:
-            print(f"AWS Bedrock error, falling back to local simulation: {e}")
-            return self.simulate_agent_locally(user_prompt, chat_history, callback)
+            print(f"AWS Bedrock error: {e}")
+            raise e
         finally:
             if trace_ctx:
                 try:
                     trace_ctx.__exit__(None, None, None)
-                    self.langfuse.flush()
                 except:
                     pass
 
