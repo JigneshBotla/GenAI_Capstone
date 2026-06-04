@@ -6,12 +6,14 @@ This document provides a highly structured, content-complete outline for your 10
 
 ## 🛝 Slide 1: Title & Project Hook
 * **Slide Title**: Deco — RAG-Powered Data Engineering Co-pilot
+Team members: Pawan Singh, Botla Jignesh, Challa Arun, Vineet Rana
+Date : June 5th, 2026
 * **Subtitle**: Streamlining Codebase Q&A, Catalog Exploration, and Observability through Hybrid GenAI
 * **Core Visuals**: Clean modern layout, a high-tech logo, and a visual link to your live Streamlit interface.
 * **Talking Points**:
   * Introduce Deco: An intelligent assistant tailored specifically to reduce operational overhead for modern Data Platform teams.
   * Emphasize the Medallion Pattern (Bronze -> Silver -> Gold) and the integration of structured metadata with unstructured code.
-  * Highlight the project tech stack: SQLite, ChromaDB, Streamlit, and AWS Bedrock (Amazon Nova Pro).
+  * Highlight the project tech stack: Snowflake, dbt, ChromaDB, Streamlit, and AWS Bedrock (Amazon Nova Pro).
 
 ---
 
@@ -53,7 +55,7 @@ This document provides a highly structured, content-complete outline for your 10
 * **Talking Points**:
   * Detail the ingestion pipeline: Markdown ADR docs and dbt files are chunked and embedded locally using `all-MiniLM-L6-v2`.
   * Highlight that all data fits locally, keeping the application 100% responsive, secure, and private.
-  * Outline the tool definitions supplied to Amazon Bedrock Nova Pro.
+  * Outline the tool definitions supplied to Amazon Bedrock Nova models (lite/pro/micro).
 
 ---
 
