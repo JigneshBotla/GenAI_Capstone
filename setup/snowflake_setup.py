@@ -12,19 +12,30 @@ def get_snowflake_connection():
     user = os.getenv("SNOWFLAKE_USER")
     password = os.getenv("SNOWFLAKE_PASSWORD")
     database = os.getenv("SNOWFLAKE_DATABASE", "Capstone_DB")
-    warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", "SIGMA_WH")
+    role = os.getenv("SNOWFLAKE_ROLE", "SYSADMIN")
+    pat = os.getenv("SNOWFLAKE_PAT")
 
-    if not account or not user or not password:
+    if not account or not user:
         raise ValueError("Missing Snowflake credentials. Please check your .env file.")
 
-    print(f"Connecting to Snowflake account: {account} as user: {user}...")
+    print(f"Connecting to Snowflake account: {account} as user: {user} with role: {role}...")
     
-    conn = snowflake.connector.connect(
-        account=account,
-        user=user,
-        password=password,
-        warehouse=warehouse
-    )
+    conn_params = {
+        "account": account,
+        "user": user,
+        "role": role,
+    }
+    
+    if pat:
+        # Use Programmatic Access Token (PAT) authentication
+        conn_params["authenticator"] = "oauth"
+        conn_params["token"] = pat
+    else:
+        if not password:
+            raise ValueError("Missing SNOWFLAKE_PASSWORD or SNOWFLAKE_PAT in .env file.")
+        conn_params["password"] = password
+
+    conn = snowflake.connector.connect(**conn_params)
     return conn, database
 
 def generate_mock_data():
@@ -132,8 +143,14 @@ def setup_snowflake():
     conn, default_db = get_snowflake_connection()
     cursor = conn.cursor()
     email_salt = os.getenv("EMAIL_HASH_SALT")
+    warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", "SIGMA_WH")
 
     try:
+        # Create warehouse first
+        print(f"Creating warehouse: {warehouse} if not exists...")
+        cursor.execute(f"CREATE WAREHOUSE IF NOT EXISTS {warehouse} WITH WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE")
+        cursor.execute(f"USE WAREHOUSE {warehouse}")
+
         # Create database and drop schemas first to prevent duplication
         print(f"Creating database: {default_db} if not exists...")
         cursor.execute(f"CREATE DATABASE IF NOT EXISTS {default_db}")

@@ -1,6 +1,5 @@
 import os
 import snowflake.connector
-from dotenv import load_dotenv
 import chromadb
 from chromadb.utils import embedding_functions
 import pandas as pd
@@ -9,30 +8,50 @@ import re
 from collections import Counter
 
 # Load environment variables
-load_dotenv()
+from dotenv import load_dotenv
+from pathlib import Path
 
+load_dotenv(Path(__file__).parent / ".env")
 class MetadataHelper:
     """Helper class to query the structured Snowflake database containing DE catalog, lineage, and run logs."""
     
     def __init__(self):
         self.account = os.getenv("SNOWFLAKE_ACCOUNT")
         self.user = os.getenv("SNOWFLAKE_USER")
-        self.password = os.getenv("SNOWFLAKE_PASSWORD")
+        self.password = os.getenv("SNOWFLAKE_PASSWORD")   # Optional fallback
+        self.pat = os.getenv("SNOWFLAKE_PAT")
         self.database = os.getenv("SNOWFLAKE_DATABASE", "Capstone_DB")
         self.warehouse = os.getenv("SNOWFLAKE_WAREHOUSE", "SIGMA_WH")
+        self.role = os.getenv("SNOWFLAKE_ROLE", "SYSADMIN")
         self.email_salt = os.getenv("EMAIL_HASH_SALT", "f8c3d9b1e5a26748c9d0e1f2b3a4c5d6")
 
 
     def _get_connection(self):
-        if not self.account or not self.user or not self.password:
-            raise ValueError("Missing Snowflake credentials. Please check your .env file.")
-        return snowflake.connector.connect(
-            account=self.account,
-            user=self.user,
-            password=self.password,
-            database=self.database,
-            warehouse=self.warehouse
-        )
+        """Create a Snowflake connection using PAT if available, otherwise password."""
+
+        if not self.account or not self.user:
+            raise ValueError("Missing Snowflake account or username in .env")
+
+        conn_params = {
+            "account": self.account,
+            "user": self.user,
+            "warehouse": self.warehouse,
+            "database": self.database,
+            "role": self.role,
+        }
+
+        # Prefer Programmatic Access Token
+        if self.pat:
+            conn_params["authenticator"] = "PROGRAMMATIC_ACCESS_TOKEN"
+            conn_params["token"] = self.pat
+        else:
+            if not self.password:
+                raise ValueError(
+                    "Neither SNOWFLAKE_PAT nor SNOWFLAKE_PASSWORD is configured."
+                )
+            conn_params["password"] = self.password
+
+        return snowflake.connector.connect(**conn_params)
 
     def _execute_query(self, query, params=()):
         conn = self._get_connection()
